@@ -69,7 +69,7 @@ Inline YAML script blocks (`pre: |`, `post: |`, `setup: |`, `teardown: |`) are c
 
 ## Rule 2 — File Path Params: Use `encodeFilePath()`, Not `encodeURIComponent`
 
-The Enigma/TinyAST API uses **real forward slashes** as path separators in file-based resource identifiers.
+The Enigma/Enigma API uses **real forward slashes** as path separators in file-based resource identifiers.
 
 - `encodeURIComponent(filePath)` converts `/` to `%2F` → **breaks routing (404)**
 - Bare `${filePath}` skips encoding of spaces, `#`, `?`, `&` etc. → **also wrong**
@@ -117,24 +117,24 @@ This applies to all endpoints with `{filePath}` or `{dirPath}` in the URL:
 
 ## Rule 3 — `ctx.http.*` Calls Must Carry Their Own Headers
 
-`ctx.request.headers['X-TinyAST-Workspace'] = ws` only affects the **curl request**. It does NOT propagate to `ctx.http.*` calls. These are two completely separate HTTP mechanisms.
+`ctx.request.headers['X-Enigma-Workspace'] = ws` only affects the **curl request**. It does NOT propagate to `ctx.http.*` calls. These are two completely separate HTTP mechanisms.
 
 Every `ctx.http.get/post/put/patch/delete` call that hits a workspace-aware endpoint must explicitly pass the header:
 
 ```javascript
 // ✅ CORRECT — header wired explicitly
 const ws = (ctx.vars.workspaceName as string) ?? '';
-const wsHeaders = ws ? { 'X-TinyAST-Workspace': ws } : {};
+const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
 const res = await ctx.http.get(`/api/fs/exists/${filePath}`, { headers: wsHeaders });
 
 // ❌ WRONG — ctx.request.headers does not carry over to ctx.http calls
-ctx.request.headers['X-TinyAST-Workspace'] = ws;
+ctx.request.headers['X-Enigma-Workspace'] = ws;
 const res = await ctx.http.get(`/api/fs/exists/${filePath}`); // no workspace header
 ```
 
 **Consequence of omission:** When multiple workspaces are loaded on the server, the API returns:
 ```json
-{"error": "Multiple workspaces are loaded. Specify one via the 'X-TinyAST-Workspace' header"}
+{"error": "Multiple workspaces are loaded. Specify one via the 'X-Enigma-Workspace' header"}
 ```
 This returns 400, which causes `ctx.assert(res.status === 200, ...)` to fail.
 
@@ -151,7 +151,7 @@ BASE_URL=$(grep BASE_URL local-dev-test-repo/envs/local.env | cut -d= -f2)
 WORKSPACE=api-testapp-1
 
 curl -s "${BASE_URL}/api/deps/hotspots?top=10" \
-  -H "X-TinyAST-Workspace: ${WORKSPACE}" | jq 'keys'
+  -H "X-Enigma-Workspace: ${WORKSPACE}" | jq 'keys'
 ```
 
 **If the response is `{"files": [...], "_sensors": [...]}` — the shape is NOT `type == "array"`.**
@@ -299,7 +299,7 @@ This creates a verifiable prediction. If the test output contradicts your predic
 ### GET test with file-path param (no encoding)
 ```javascript
 const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-TinyAST-Workspace'] = ws;
+if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
 
 const filePath = (ctx.vars.filePath as string) || ctx.env.FILE_PATH || '';
 ctx.assert(!!filePath, 'FILE_PATH is not set — required for this test');
@@ -309,8 +309,8 @@ ctx.request.path = `/api/code/structure/${filePath}`;
 ### Pre-script with a `ctx.http` verification call
 ```javascript
 const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-TinyAST-Workspace'] = ws;
-const wsHeaders = ws ? { 'X-TinyAST-Workspace': ws } : {};
+if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
+const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
 
 // ← Every ctx.http call needs its own wsHeaders
 const checkRes = await ctx.http.get(`/api/fs/exists/${filePath}`, { headers: wsHeaders });
@@ -321,8 +321,8 @@ ctx.assert(checkRes.status === 200, `File not found: ${checkRes.status}`);
 ```javascript
 // Declare ws ONCE at the top of the script
 const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-TinyAST-Workspace'] = ws;
-const wsHeaders = ws ? { 'X-TinyAST-Workspace': ws } : {};
+if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
+const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
 
 // Reuse wsHeaders and ws for all sub-calls — do NOT re-declare
 const r1 = await ctx.http.get('/api/something', { headers: wsHeaders });

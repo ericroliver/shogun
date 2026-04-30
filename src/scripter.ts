@@ -148,7 +148,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
     const t = ctx.env.AUTH_TOKEN;
     headers['Authorization'] = t.startsWith('Bearer ') ? t : 'Bearer ' + t;
   }
-  // Merge caller-supplied headers (e.g. X-TinyAST-Workspace) — these take precedence
+  // Merge caller-supplied headers (e.g. X-Enigma-Workspace) — these take precedence
   if (_opts?.headers && typeof _opts.headers === 'object') {
     for (const [k, v] of Object.entries(_opts.headers as Record<string, string>)) {
       if (v !== undefined && v !== null) headers[k] = String(v);
