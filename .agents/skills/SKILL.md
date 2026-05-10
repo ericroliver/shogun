@@ -69,7 +69,7 @@ Inline YAML script blocks (`pre: |`, `post: |`, `setup: |`, `teardown: |`) are c
 
 ## Rule 2 — File Path Params: Use `encodeFilePath()`, Not `encodeURIComponent`
 
-The Enigma/Enigma API uses **real forward slashes** as path separators in file-based resource identifiers.
+The Enigma API uses **real forward slashes** as path separators in file-based resource identifiers.
 
 - `encodeURIComponent(filePath)` converts `/` to `%2F` → **breaks routing (404)**
 - Bare `${filePath}` skips encoding of spaces, `#`, `?`, `&` etc. → **also wrong**
