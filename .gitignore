@@ -3,6 +3,7 @@ dist/
 local*/
 bin/
 reference/
+local*
 
 # Generated test run output — never commit
 runs/

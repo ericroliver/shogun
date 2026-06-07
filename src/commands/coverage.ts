@@ -29,7 +29,7 @@ export interface CoverageArgs {
   /** --env: load env file for live spec fetching */
   env?: string;
   /** --collection: scope test-side to one collection */
-  collection?: string;
+  collection?: string | string[];
   /** --suite: scope test-side to a named suite */
   suite?: string;
   /** --tag: scope spec-side to a tag group */
@@ -195,7 +195,7 @@ function extractSpecEndpoints(openApi: OpenApiSpec, tagFilter?: string): SpecEnd
 async function collectTestEntries(
   config: ShogunConfig,
   cwd: string,
-  collectionFilter?: string,
+  collectionFilter?: string | string[],
   suiteFilter?: string,
 ): Promise<TestEntry[]> {
   const testsDir = join(cwd, config.paths?.tests ?? 'tests');
@@ -208,7 +208,7 @@ async function collectTestEntries(
     const suite = loadSuite(suiteFilter, config, cwd);
     collectionNames = suite.collections;
   } else if (collectionFilter) {
-    collectionNames = [collectionFilter];
+    collectionNames = Array.isArray(collectionFilter) ? collectionFilter : [collectionFilter];
   } else {
     collectionNames = discoverCollections(config, cwd);
   }

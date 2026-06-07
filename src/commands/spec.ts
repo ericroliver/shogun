@@ -89,7 +89,7 @@ interface ResponseObject {
 }
 
 interface SchemaObject {
-  type?: string;
+  type?: string | string[];   // OpenAPI 3.1 allows array syntax: ["string","null"]
   format?: string;
   nullable?: boolean;
   description?: string;
@@ -117,6 +117,24 @@ function isRef(obj: unknown): obj is RefObject {
 // ---------------------------------------------------------------------------
 
 export async function spec(args: SpecArgs): Promise<number> {
+  // ---------------------------------------------------------------------------
+  // Guard: detect misuse of the positional arg as "METHOD /path" shorthand.
+  // The positional is a spec source override (URL or file path), not an
+  // endpoint query.  Give a clear error rather than a confusing fetch failure.
+  // ---------------------------------------------------------------------------
+  if (args.specSource) {
+    const methodPath = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S*)$/i.exec(args.specSource.trim());
+    if (methodPath) {
+      console.error(
+        `Error: positional argument looks like an endpoint query but that is not supported.\n` +
+        `  You passed: "${args.specSource}"\n` +
+        `  Use flags instead:\n` +
+        `    shogun spec --endpoint ${methodPath[2]} --method ${methodPath[1]!.toUpperCase()}`
+      );
+      return 1;
+    }
+  }
+
   const cwd = args.cwd ?? process.cwd();
 
   // Load config (best-effort — no error if missing)
@@ -555,7 +573,7 @@ function renderBlockPretty(block: EndpointBlock): void {
       const flags = buildFlags(p.required, p.nullable);
       const enumHint = p.enum ? `  enum: [${p.enum.join(', ')}]` : '';
       const desc = p.description ? `  ${p.description}` : '';
-      console.log(`  • ${p.name.padEnd(20)} ${p.type.padEnd(12)} ${flags}${desc}${enumHint}`);
+      console.log(`  • ${p.name.padEnd(20)} ${(p.type ?? 'unknown').padEnd(12)} ${flags}${desc}${enumHint}`);
     }
   }
 
@@ -580,7 +598,7 @@ function renderFieldsPretty(fields: ResolvedField[], indent: string): void {
     const flags = buildFlags(f.required, f.nullable);
     const enumHint = f.enum ? `  enum: [${f.enum.join(', ')}]` : '';
     const desc = f.description ? `  ${f.description}` : '';
-    console.log(`${indent}• ${f.name.padEnd(20)} ${f.type.padEnd(12)} ${flags}${desc}${enumHint}`);
+    console.log(`${indent}• ${f.name.padEnd(20)} ${(f.type ?? 'unknown').padEnd(12)} ${flags}${desc}${enumHint}`);
     if (f.properties && f.properties.length > 0) {
       renderFieldsPretty(f.properties, indent + '    ');
     }
@@ -595,7 +613,7 @@ function renderSchemaFieldsPretty(resolved: SchemaObject, indent: string, requir
     const flags = buildFlags(reqSet.has(name), prop.nullable ?? false);
     const enumHint = prop.enum ? `  enum: [${prop.enum.join(', ')}]` : '';
     const desc = prop.description ? `  ${prop.description}` : '';
-    const type = schemaTypeString(prop);
+    const type = schemaTypeString(prop) ?? 'unknown';
     console.log(`${indent}${name.padEnd(24)} ${type.padEnd(16)} ${flags}${desc}${enumHint}`);
     if (prop.properties) {
       renderSchemaFieldsPretty(prop, indent + '    ', prop.required ?? []);
@@ -769,21 +787,37 @@ function refName(ref: string): string {
 
 function schemaTypeString(schema: SchemaObject | undefined): string {
   if (!schema) return 'unknown';
-  if (schema.type === 'array') {
+
+  // Normalise OpenAPI 3.1 array-type syntax: ["string","null"] → "string?"
+  let typeStr: string | undefined;
+  if (Array.isArray(schema.type)) {
+    const nonNull = schema.type.filter(t => t !== 'null');
+    const nullable = schema.type.includes('null');
+    typeStr = nonNull.length > 0
+      ? nonNull.join('|') + (nullable ? '?' : '')
+      : 'null';
+  } else {
+    typeStr = schema.type;
+  }
+
+  if (typeStr === 'array') {
     if (schema.items) {
       const itemsSchema = schema.items as SchemaObject;
-      const itemType = itemsSchema.type ?? (isRef(itemsSchema) ? refName((itemsSchema as RefObject)['$ref']) : 'unknown');
+      const rawItemType = itemsSchema.type;
+      const itemType = Array.isArray(rawItemType)
+        ? rawItemType.filter(t => t !== 'null').join('|') || 'unknown'
+        : rawItemType ?? (isRef(itemsSchema) ? refName((itemsSchema as RefObject)['$ref']) : 'unknown');
       return `array<${itemType}>`;
     }
     return 'array';
   }
-  if (schema.type === 'object' && schema.properties) {
+  if (typeStr === 'object' && schema.properties) {
     return 'object{...}';
   }
   if (schema.enum) {
-    return schema.type ?? 'string';
+    return typeStr ?? 'string';
   }
-  return schema.type ?? 'object';
+  return typeStr ?? 'object';
 }
 
 function buildFlags(required: boolean, nullable: boolean): string {

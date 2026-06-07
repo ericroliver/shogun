@@ -48,7 +48,7 @@ export class RunLogger {
   /** Write the final summary.json for this run. */
   finalize(opts: {
     env: string;
-    collection?: string;
+    collection?: string | string[];
     suite?: string;
     startedAt?: string;
   }): RunSummary {
