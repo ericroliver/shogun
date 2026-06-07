@@ -252,7 +252,7 @@ async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
         };
         resolve({
           passed: true,
-          logs: [...logs, ...(output.logs ?? [])],
+          logs: output.logs ?? [],
           requestMutations: output.request,
           varMutations: output.vars,
         });
