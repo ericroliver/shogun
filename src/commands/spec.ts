@@ -787,7 +787,6 @@ function refName(ref: string): string {
 
 function schemaTypeString(schema: SchemaObject | undefined): string {
   if (!schema) return 'unknown';
-
   // Normalise OpenAPI 3.1 array-type syntax: ["string","null"] → "string?"
   let typeStr: string | undefined;
   if (Array.isArray(schema.type)) {
