@@ -7,7 +7,7 @@ import { runTests } from '../runner.js';
 
 export interface SnapshotArgs {
   env?: string;
-  collection?: string;
+  collection?: string | string[];
   suite?: string;
   file?: string;
 }

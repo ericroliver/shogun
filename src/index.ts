@@ -12,21 +12,13 @@ import { coverage } from './commands/coverage.js';
 import { checkBackend } from './commands/check-backend.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
 import { initExecutor, checkDependencies } from './executor.js';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// VERSION is a generated constant so it is always correct whether shogun is
+// run via tsx, via the compiled dist/, or as a standalone bun binary.
+// See scripts/gen-version.mjs — it is regenerated before every pkg:* build.
+import { VERSION } from './version.js';
 
 function getVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
-    );
-    return pkg.version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
+  return VERSION;
 }
 
 const USAGE = `
@@ -36,6 +28,7 @@ Usage:
   shogun run                          Run all tests (default env)
   shogun run --env QA                 Select environment
   shogun run --collection agents      Run one collection
+  shogun run --collection a --collection b  Run multiple collections
   shogun run --tags smoke             Filter by tag (comma-separated)
   shogun run --suite smoke            Run a named suite
   shogun run --file path/to/test.yaml Run single test file
@@ -80,7 +73,7 @@ Usage:
 
 interface ParsedArgs {
   env?: string;
-  collection?: string;
+  collection?: string | string[];
   tags?: string[];
   suite?: string;
   file?: string;
@@ -106,7 +99,17 @@ function parseArgs(argv: string[]): ParsedArgs {
     const arg = argv[i]!;
     switch (arg) {
       case '--env':        result.env = argv[++i]; break;
-      case '--collection': result.collection = argv[++i]; break;
+      case '--collection': {
+        const val = argv[++i]!;
+        if (!result.collection) {
+          result.collection = val;
+        } else if (Array.isArray(result.collection)) {
+          result.collection.push(val);
+        } else {
+          result.collection = [result.collection, val];
+        }
+        break;
+      }
       case '--tags':       result.tags = argv[++i]!.split(',').map(t => t.trim()); break;
       case '--suite':      result.suite = argv[++i]; break;
       case '--file':       result.file = argv[++i]; break;
@@ -123,8 +126,14 @@ function parseArgs(argv: string[]): ParsedArgs {
       case '--list':       result.list = true; break;
       case '--uncovered':  result.uncovered = true; break;
       default:
-        // Bare positional (no -- prefix) — used as spec source override
-        if (!arg.startsWith('--')) {
+        if (arg.startsWith('--')) {
+          // Unknown flag — skip the value token if it doesn't look like a flag
+          // itself, then warn so the user knows the flag was not recognised.
+          const nextIsValue = argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('--');
+          if (nextIsValue) i++;
+          console.warn(`Warning: unrecognised flag "${arg}" ignored.  Run shogun --help for usage.`);
+        } else {
+          // Bare positional — used as spec source override
           result.specSource = arg;
         }
         break;

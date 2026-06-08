@@ -7,7 +7,7 @@ import { printReport } from '../reporter.js';
 
 export interface RunArgs {
   env?: string;
-  collection?: string;
+  collection?: string | string[];
   tags?: string[];
   suite?: string;
   file?: string;

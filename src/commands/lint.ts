@@ -413,7 +413,7 @@ function findDuplicateDeclarations(
  * Scans an inline script block for lines that build `ctx.request.path` using
  * bare `encodeURIComponent()` around a file-path or dir-path variable.
  *
- * The Enigma/TinyAST API uses real '/' as path separators — encodeURIComponent
+ * The Enigma/Enigma API uses real '/' as path separators — encodeURIComponent
  * converts '/' to '%2F' which breaks routing (returns 404). The fix is to use
  * `encodeFilePath()` from `ctx.scripts.url` which encodes per segment.
  *
