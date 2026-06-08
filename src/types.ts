@@ -246,7 +246,7 @@ export interface TestResult {
 export interface RunSummary {
   runId: string;
   env: string;
-  collection?: string;
+  collection?: string | string[];
   suite?: string;
   startedAt: string;
   finishedAt: string;

@@ -56,13 +56,13 @@ ctx.request.path = `/api/code/structure/${filePath}`;
 ```javascript
 // Line ~21:
 const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-TinyAST-Workspace'] = ws;
+if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
 
 // ... (several lines of code) ...
 
 // Line ~31 — DUPLICATE DECLARATION:
 const ws = (ctx.vars.workspaceName as string) ?? '';
-const wsHeaders: Record<string, string> = ws ? { 'X-TinyAST-Workspace': ws } : {};
+const wsHeaders: Record<string, string> = ws ? { 'X-Enigma-Workspace': ws } : {};
 ```
 
 TypeScript/esbuild rejects this at compile time with a lexical scope violation.
@@ -111,18 +111,18 @@ shape:
 
 **Symptom:** Pre-script verification call to `GET /api/fs/exists/{filePath}` returns 400:
 ```
-{"error":"Multiple workspaces are loaded. Specify one via the 'X-TinyAST-Workspace' header"}
+{"error":"Multiple workspaces are loaded. Specify one via the 'X-Enigma-Workspace' header"}
 ```
 
-**The request headers log shows:** `{"Content-Type":"application/json","Accept":"application/json"}` — no `X-TinyAST-Workspace` header.
+**The request headers log shows:** `{"Content-Type":"application/json","Accept":"application/json"}` — no `X-Enigma-Workspace` header.
 
 **The pre-script code:**
 ```javascript
 const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-TinyAST-Workspace'] = ws;
+if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
 // ...
 const existsRes = await ctx.http.get(`/api/fs/exists/${filePath}`, {
-  headers: ws ? { 'X-TinyAST-Workspace': ws } : {}
+  headers: ws ? { 'X-Enigma-Workspace': ws } : {}
 });
 ```
 
@@ -207,9 +207,9 @@ The actual goal is the opposite: tests should fail until the API behaves correct
 
 ### 7. `ctx.http.*` calls need explicit workspace header — NOT automatically inherited
 
-`ctx.request.headers['X-TinyAST-Workspace'] = ws` only affects the curl request. It does not affect `ctx.http.get/post/put/delete` calls. These are two completely separate HTTP mechanisms with separate header management.
+`ctx.request.headers['X-Enigma-Workspace'] = ws` only affects the curl request. It does not affect `ctx.http.get/post/put/delete` calls. These are two completely separate HTTP mechanisms with separate header management.
 
-Every `ctx.http.*` call that hits an endpoint requiring workspace context must explicitly include `'X-TinyAST-Workspace': ws` in its `headers` option.
+Every `ctx.http.*` call that hits an endpoint requiring workspace context must explicitly include `'X-Enigma-Workspace': ws` in its `headers` option.
 
 **What would help:** A standard pattern documented in the testing journal and enforced as a rule.
 
@@ -240,8 +240,8 @@ The skill file for "shogun test maintenance" should mandate the following steps,
 2. Never encode `/` separators for `api-testapp-1` file path params
 
 ### Before writing any `ctx.http.*` call in a script
-1. Determine if the endpoint requires `X-TinyAST-Workspace`
-2. If yes, always pass `headers: { 'X-TinyAST-Workspace': ws }` explicitly
+1. Determine if the endpoint requires `X-Enigma-Workspace`
+2. If yes, always pass `headers: { 'X-Enigma-Workspace': ws }` explicitly
 3. Do NOT assume this header is inherited from `ctx.request.headers`
 
 ### After editing any test

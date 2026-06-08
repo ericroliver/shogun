@@ -65,7 +65,7 @@ Higher wins. A collection `vars:` value for `FILE_PATH` overrides a suite `vars:
 ```yaml
 name: Code / AST API
 vars:
-  FILE_PATH: src/TinyAST.Api/Endpoints/WorkspaceBackupEndpoints.cs
+  FILE_PATH: src/Enigma.Api/Endpoints/WorkspaceBackupEndpoints.cs
   CLASS_NAME: WorkspaceBackupEndpoints
   METHOD_NAME: CreateBackup
   PROPERTY_NAME: Name

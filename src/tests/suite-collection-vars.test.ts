@@ -74,7 +74,7 @@ describe('Story 1 — CollectionDefinition vars', () => {
       writeCollectionDef(cwd, 'my-collection', `
 name: My Collection
 vars:
-  FILE_PATH: src/TinyAST.Api/Endpoints/WorkspaceBackupEndpoints.cs
+  FILE_PATH: src/Enigma.Api/Endpoints/WorkspaceBackupEndpoints.cs
   CLASS_NAME: WorkspaceBackupEndpoints
   METHOD_NAME: CreateBackup
 `);
@@ -82,7 +82,7 @@ vars:
       const { definition } = loadCollection('my-collection', config, cwd);
 
       assert.deepEqual(definition.vars, {
-        FILE_PATH: 'src/TinyAST.Api/Endpoints/WorkspaceBackupEndpoints.cs',
+        FILE_PATH: 'src/Enigma.Api/Endpoints/WorkspaceBackupEndpoints.cs',
         CLASS_NAME: 'WorkspaceBackupEndpoints',
         METHOD_NAME: 'CreateBackup',
       });

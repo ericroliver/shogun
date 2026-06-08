@@ -29,7 +29,7 @@ import type {
 
 export interface RunOptions {
   env?: string;
-  collection?: string;
+  collection?: string | string[];
   tags?: string[];
   suite?: string;
   file?: string;
@@ -106,7 +106,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
       Object.assign(vars, suite.vars);
     }
   } else if (opts.collection) {
-    collectionNames = [opts.collection];
+    collectionNames = Array.isArray(opts.collection) ? opts.collection : [opts.collection];
   } else {
     collectionNames = discoverCollections(config, cwd);
   }

@@ -12,6 +12,7 @@ export class RunLogger {
   private readonly runDir: string;
   private readonly results: TestResult[] = [];
   private startedAt: string;
+  private logSerial = 0;
 
   constructor(private readonly config: ShogunConfig, private readonly cwd: string = process.cwd()) {
     this.startedAt = new Date().toISOString();
@@ -37,7 +38,9 @@ export class RunLogger {
       return;
     }
 
-    const logName = `${collectionName}--${safeFileName(result.name)}.log`;
+    this.logSerial += 1;
+    const serial = String(this.logSerial).padStart(4, '0');
+    const logName = `${serial}_${collectionName}--${safeFileName(result.name)}.log`;
     const logPath = join(this.runDir, logName);
     writeFileSync(logPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
   }
@@ -45,7 +48,7 @@ export class RunLogger {
   /** Write the final summary.json for this run. */
   finalize(opts: {
     env: string;
-    collection?: string;
+    collection?: string | string[];
     suite?: string;
     startedAt?: string;
   }): RunSummary {

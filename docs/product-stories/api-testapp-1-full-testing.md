@@ -92,7 +92,7 @@ const wsName = ((ctx.vars.WORKSPACE_NAME as string) ?? ctx.env.WORKSPACE_NAME ??
 ```yaml
 name: Code / AST API
 vars:
-  FILE_PATH: src/TinyAST.Api/Endpoints/WorkspaceBackupEndpoints.cs
+  FILE_PATH: src/Enigma.Api/Endpoints/WorkspaceBackupEndpoints.cs
   CLASS_NAME: WorkspaceBackupEndpoints
   METHOD_NAME: CreateBackup
   PROPERTY_NAME: Name
@@ -205,8 +205,8 @@ if (ctx.vars.preTestBackup) {
 **so that** I prove Enigma can enumerate, read, and verify files in a real project.
 
 **Targets in fs collection (already implemented — needs env var population):**
-- `GET /api/fs/list/{dirPath}` — explore `src/`, `src/TinyAST.Api/`, frontend dirs
-- `GET /api/fs/exists/{path}` — check existence of known files (e.g., `src/TinyAST.Api/Endpoints/WorkspaceBackupEndpoints.cs`)
+- `GET /api/fs/list/{dirPath}` — explore `src/`, `src/Enigma.Api/`, frontend dirs
+- `GET /api/fs/exists/{path}` — check existence of known files (e.g., `src/Enigma.Api/Endpoints/WorkspaceBackupEndpoints.cs`)
 - `GET /api/fs/file/{filePath}` — read a real .cs file content
 - `GET /api/fs/verify/{filePath}` — verify a known file's hash/integrity
 
@@ -239,7 +239,7 @@ if (ctx.vars.preTestBackup) {
 
 **Env vars to populate:**
 ```
-FILE_PATH=src/TinyAST.Api/Endpoints/<SomeEndpointFile.cs>
+FILE_PATH=src/Enigma.Api/Endpoints/<SomeEndpointFile.cs>
 CLASS_NAME=<ClassName in that file>
 METHOD_NAME=<MethodName in that class>
 PROPERTY_NAME=<PropertyName on that class>

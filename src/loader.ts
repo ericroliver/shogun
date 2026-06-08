@@ -279,13 +279,23 @@ export function loadCollection(
     }
   }
 
-  // Append any local files not already in the ordered list
-  const unordered = localTestFiles
-    .filter(f => !resolvedOrderedKeys.has(f))
-    .sort()
-    .map(f => join(collectionDir, `${f}.yaml`));
+  // When order: is explicitly defined in _collection.yaml, treat it as the
+  // authoritative and complete list.  Files present on disk but absent from
+  // order: are intentionally excluded (e.g. temporarily disabled tests).
+  //
+  // When order: is absent entirely (undefined), fall back to scanning the
+  // directory so collections without an order: still work as before.
+  let testFiles: string[];
 
-  const testFiles = [...resolvedOrdered, ...unordered];
+  if (definition.order !== undefined) {
+    // order: was explicitly set — honour it as the full list, no extras
+    testFiles = resolvedOrdered;
+  } else {
+    // No order: at all — run every YAML file in the directory, sorted
+    testFiles = localTestFiles
+      .sort()
+      .map(f => join(collectionDir, `${f}.yaml`));
+  }
 
   return { definition, testFiles };
 }
