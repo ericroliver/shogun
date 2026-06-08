@@ -5,6 +5,8 @@ bin/
 reference/
 local*
 
+coverage*
+
 # Generated test run output — never commit
 runs/
 

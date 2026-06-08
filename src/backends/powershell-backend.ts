@@ -31,6 +31,124 @@ import type {
   AssertContext,
 } from '../backend-interface.js';
 
+// ===========================================================================
+// Pure helper functions — exported for unit testing
+// ===========================================================================
+
+export function escapeForPowerShell(str: string): string {
+  return str.replace(/'/g, "''").replace(/"/g, '`"');
+}
+
+export function escapeHereString(str: string): string {
+  return str.replace(/'/g, "''");
+}
+
+export function parsePowerShellResponse(output: string, duration: number): ShogunResponse {
+  const lines = output.split('\n');
+  let status = 0;
+  const headers: Record<string, string> = {};
+  let bodyRaw = '';
+
+  for (const line of lines) {
+    if (line.startsWith('STATUS:')) {
+      status = parseInt(line.slice(7), 10) || 0;
+    } else if (line.startsWith('HEADERS:')) {
+      try {
+        const h = JSON.parse(line.slice(8));
+        for (const [k, v] of Object.entries(h)) {
+          headers[(k as string).toLowerCase()] = String(v);
+        }
+      } catch { /* ignore */ }
+    } else if (line.startsWith('BODY:')) {
+      bodyRaw = line.slice(5);
+    } else if (line.startsWith('ERROR:')) {
+      bodyRaw = line.slice(6);
+    }
+  }
+
+  let body: unknown = bodyRaw;
+  try {
+    if (bodyRaw.trim().startsWith('{') || bodyRaw.trim().startsWith('[')) {
+      body = JSON.parse(bodyRaw);
+    }
+  } catch { /* keep as string */ }
+
+  return {
+    status,
+    headers,
+    body,
+    raw: bodyRaw,
+    duration,
+    curlMs: duration,
+  };
+}
+
+export function buildPsUrl(req: ShogunRequest): string {
+  let url = req.url;
+  const params = req.params;
+  if (params && Object.keys(params).length > 0) {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
+    ).toString();
+    url += (url.includes('?') ? '&' : '?') + qs;
+  }
+  return url;
+}
+
+export function buildPsHeaders(req: ShogunRequest, env: EnvVars): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    ...req.headers,
+  };
+  if (env.AUTH_TOKEN && !headers['Authorization']) {
+    const token = env.AUTH_TOKEN;
+    headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+  }
+  return headers;
+}
+
+export function formatHeadersForPowerShell(headers: Record<string, string>): string {
+  return Object.entries(headers)
+    .map(([k, v]) => `$headers["${k}"] = "${escapeForPowerShell(v)}"`)
+    .join('\n      ');
+}
+
+export function buildBodyArg(req: ShogunRequest): string {
+  if (req.body === undefined || req.body === null) return '';
+  const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  return `$splat.Body = '${escapeForPowerShell(bodyStr)}'`;
+}
+
+export function convertIgnoreFieldToPowerShell(field: string): string {
+  const key = field.startsWith('.') ? field.slice(1) : field;
+  return `$json.PSObject.Properties.Remove("${key}")`;
+}
+
+export function formatSimpleDiff(expected: string, actual: string): string {
+  const expLines = expected.split('\n');
+  const actLines = actual.split('\n');
+  const maxLen = Math.max(expLines.length, actLines.length);
+  const diffLines: string[] = ['--- expected', '+++ actual'];
+  let hasDiff = false;
+  for (let i = 0; i < maxLen; i++) {
+    const e = expLines[i];
+    const a = actLines[i];
+    if (e !== a) {
+      hasDiff = true;
+      if (e !== undefined) diffLines.push(`- ${e}`);
+      if (a !== undefined) diffLines.push(`+ ${a}`);
+    } else {
+      diffLines.push(`  ${e}`);
+    }
+  }
+  return hasDiff ? diffLines.join('\n') : '';
+}
+
+// ===========================================================================
+// PowerShell Backend class
+// ===========================================================================
+
 export class PowerShellBackend implements BackendExecutor {
   readonly name = 'powershell' as const;
 

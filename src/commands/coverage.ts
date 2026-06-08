@@ -56,7 +56,7 @@ interface TestEntry {
   matchedSpecKey?: string; // "GET /api/graph/nodes" — set after matching
 }
 
-interface SpecEndpoint {
+export interface SpecEndpoint {
   method: string;         // uppercase
   path: string;           // raw OAS path e.g. /api/graph/nodes/{path}
   tag?: string;
@@ -281,7 +281,7 @@ function matchTests(testEntries: TestEntry[], specEndpoints: SpecEndpoint[]): vo
  * TIER 2: Segment-count-equal template match (wildcard segment alignment)
  * TIER 3: Prefix fallback for multi-segment dynamic tails
  */
-function matchTestToSpecEndpoint(
+export function matchTestToSpecEndpoint(
   method: string,
   testPath: string,
   specEndpoints: SpecEndpoint[],
@@ -356,7 +356,7 @@ function matchTestToSpecEndpoint(
   return prefixCandidates[0];
 }
 
-function isDynamic(seg: string): boolean {
+export function isDynamic(seg: string): boolean {
   return seg === '__placeholder__' ||
          seg.startsWith('${') ||
          (seg.includes('{') && seg.includes('}'));

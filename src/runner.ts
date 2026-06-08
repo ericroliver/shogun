@@ -683,16 +683,16 @@ teardown: |
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildUrl(baseUrl: string, path: string): string {
+export function buildUrl(baseUrl: string, path: string): string {
   if (path.startsWith('http')) return path;
   return baseUrl.replace(/\/$/, '') + (path.startsWith('/') ? path : '/' + path);
 }
 
-function normalizeParams(params: Record<string, string | number | boolean>): Record<string, string> {
+export function normalizeParams(params: Record<string, string | number | boolean>): Record<string, string> {
   return Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
 }
 
-function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, baseUrl: string): ShogunRequest {
+export function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, baseUrl: string): ShogunRequest {
   const merged = { ...base, ...mutations };
   // Re-derive URL if path changed
   if (mutations.path && mutations.path !== base.path) {
@@ -701,14 +701,14 @@ function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, ba
   return merged;
 }
 
-function applyVarMutations(vars: Record<string, unknown>, varMutations?: Record<string, unknown>): void {
+export function applyVarMutations(vars: Record<string, unknown>, varMutations?: Record<string, unknown>): void {
   if (!varMutations) return;
   for (const [key, value] of Object.entries(varMutations)) {
     vars[key] = value;
   }
 }
 
-function makeDummyRequest(baseUrl: string): ShogunRequest {
+export function makeDummyRequest(baseUrl: string): ShogunRequest {
   return {
     method: 'GET',
     path: '/',
@@ -718,7 +718,7 @@ function makeDummyRequest(baseUrl: string): ShogunRequest {
   };
 }
 
-function makeFailedResult(
+export function makeFailedResult(
   name: string,
   file: string,
   startMs: number,

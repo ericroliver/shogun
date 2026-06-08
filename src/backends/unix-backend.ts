@@ -146,7 +146,7 @@ export async function executeRequest(
   }
 }
 
-function buildUrl(req: ShogunRequest): string {
+export function buildUrl(req: ShogunRequest): string {
   let url = req.url;
   const params = req.params;
   if (params && Object.keys(params).length > 0) {
@@ -158,7 +158,7 @@ function buildUrl(req: ShogunRequest): string {
   return url;
 }
 
-function parseResponseHeaders(stdout: string): Record<string, string> {
+export function parseResponseHeaders(stdout: string): Record<string, string> {
   const headers: Record<string, string> = {};
   const lines = stdout.split('\n');
   for (const line of lines) {
@@ -259,7 +259,7 @@ export async function normalizeJson(raw: string, ignoreFields: string[]): Promis
   });
 }
 
-function globToJqDel(field: string): string {
+export function globToJqDel(field: string): string {
   if (field.startsWith('**.')) {
     const key = field.slice(3);
     return `del(.. | objects | .${key}?)`;
@@ -276,7 +276,7 @@ export async function runDiff(expected: string, actual: string): Promise<string>
   return formatSimpleDiff(expected, actual);
 }
 
-function formatSimpleDiff(expected: string, actual: string): string {
+export function formatSimpleDiff(expected: string, actual: string): string {
   const expLines = expected.split('\n');
   const actLines = actual.split('\n');
   const maxLen = Math.max(expLines.length, actLines.length);
@@ -363,7 +363,7 @@ function getExpectedPath(ctx: AssertContext): string {
   return getExpectedPathFromTest(ctx.test, ctx.config, ctx.cwd, ctx.collectionName);
 }
 
-function getExpectedPathFromTest(
+export function getExpectedPathFromTest(
   test: TestDefinition,
   config: ShogunConfig,
   cwd = process.cwd(),

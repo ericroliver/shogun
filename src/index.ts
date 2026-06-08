@@ -16,6 +16,7 @@ import { initExecutor, checkDependencies } from './executor.js';
 // run via tsx, via the compiled dist/, or as a standalone bun binary.
 // See scripts/gen-version.mjs — it is regenerated before every pkg:* build.
 import { VERSION } from './version.js';
+import { fileURLToPath } from 'node:url';
 
 function getVersion(): string {
   return VERSION;
@@ -93,7 +94,7 @@ interface ParsedArgs {
   uncovered?: boolean;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -240,7 +241,10 @@ async function main() {
   }
 }
 
-main().catch((err: unknown) => {
+// Only run main() when executed directly (not when imported for testing)
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err: unknown) => {
   console.error('Fatal error:', err);
   process.exit(1);
-});
+  });
+}

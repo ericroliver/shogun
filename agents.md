@@ -1,26 +1,6 @@
-# Shogun — Agent Context File
-
-> This file is the first thing an AI agent (or new human contributor) should read before touching this project.
-
 ---
-
-## ⚠️ CRITICAL — Two Suites, Two Workspaces, Never Mix Them
-
-The `local-dev-test-repo` runs tests against **two completely separate workspaces** on the Enigma server. They are **not interchangeable**. Never modify one suite's collection files, vars, or snapshots while working on the other.
-
-| Suite | `vars: WORKSPACE_NAME` | Purpose |
-|-------|------------------------|---------|
-| `smoke.yaml` / `tsap.yaml` | `apitesting` | Quick health check + full regression against the **stable synthetic fixture workspace**. Snapshots in `expected/` were captured against this workspace. |
-| `api-testapp-1.yaml` | `api-testapp-1` | Deep integration tests against a **real TypeScript/Svelte/.NET todo application workspace**. Separate snapshot lifecycle. |
-
-### Rules an AI agent MUST follow
-
-1. **Never change `smoke.yaml` or `tsap.yaml` collection vars/files** while working on `api-testapp-1` testing tasks, and vice versa.
-2. **Never re-snapshot** `expected/` baselines using a non-`apitesting` workspace — that breaks the smoke/tsap suite for everyone.
-3. **"Failing tests" in the `code` / `fs` collection when running `--suite api-testapp-1`** are almost always caused by path-param vars (`FILE_PATH`, `CLASS_NAME`, etc.) still pointing to `apitesting` fixtures (`SampleController.vb`, `ClassA.vb`, etc.) — not API bugs. Fix by adding a `vars:` block to the collection `_collection.yaml`.
-4. **Collection `_collection.yaml` files are shared** between suites (the same `code/_collection.yaml` is used by both smoke and api-testapp-1). Only add a `vars:` block — never remove or change existing `smoke`-safe logic that works without vars.
-5. **Suite vars inject at run time** (`ctx.vars.WORKSPACE_NAME` etc.) — don't hard-code workspace names into collection setup scripts; always use the bridge pattern: `((ctx.vars.X as string) ?? ctx.env.X ?? '').trim()`.
-
+name: shogun
+description: agent instructions for coding within the shogun repo.
 ---
 
 ## What Is Shogun?
@@ -29,9 +9,9 @@ The `local-dev-test-repo` runs tests against **two completely separate workspace
 
 The core philosophy: use UNIX tools (curl, jq, diff) for HTTP execution and response comparison, and only bring TypeScript in where logic, scripting, or programmability are genuinely needed. No HTTP client libraries. No heavy test frameworks. Just curl pipes and YAML.
 
-**This repo is the shogun engine** — the CLI tool itself. The test definitions (YAML) live in a separate "test repo" that the user creates. A reference test repo lives at [`local-dev-test-repo/`](local-dev-test-repo/) and is the integration target for all shogun development work.
+**This repo is the shogun engine** — the CLI tool itself. The test definitions (YAML) live in a separate "test repo" that the user creates. A reference test repo lives at [`test-repo/`](test-repo/) and is the integration target for all shogun development work.
 
-[`local-dev-test-repo/`](local-dev-test-repo/) is testing a real repo (Engigma) and we seek to accomplish two goals:
+[`test-repo/`](test-repo/) is testing a real repo (Engigma) and we seek to accomplish two goals:
 - stretch the limits of shogun to learn where we need to improve and extend
 - find legitimate bugs in the Enigma api. It is under rapid development as well. When tests break and you are told that the Engima API team has shipped major updates, we need to be reviewing fails in terms of perhaps there is a break in the Enigma API itself. You can't assume the tests are wrong.
 
@@ -55,21 +35,21 @@ The core philosophy: use UNIX tools (curl, jq, diff) for HTTP execution and resp
 | [`src/types.ts`](src/types.ts) | All shared types — `ShogunContext`, `TestDefinition`, `RunSummary`, etc. |
 | [`src/commands/`](src/commands/) | One file per CLI command (`run`, `snapshot`, `lint`, `report`) |
 
-### Reference Test Repo (`local-dev-test-repo/`)
+### Reference Test Repo (`test-repo/`)
 
 This is the live integration test bed — shogun is run against a real API using this repo.
 
 | Path | Role |
 |------|------|
-| `local-dev-test-repo/shogun.config.yaml` | Config for the local test repo |
-| `local-dev-test-repo/envs/local.env` | Local env vars — **gitignored**, copy from `.env.example` |
-| `local-dev-test-repo/tests/collections/` | All test collections (one dir per domain) |
-| `local-dev-test-repo/tests/suites/` | Named suites (`smoke.yaml`, `gets-all.yaml`) |
-| `local-dev-test-repo/expected/` | Snapshot baselines — committed to git |
-| `local-dev-test-repo/testing-plans/` | Human-written plans for each collection (living design docs) |
-| `local-dev-test-repo/specs/` | OpenAPI spec and API summary for the target API |
-| `local-dev-test-repo/specs/enigma-api.json` | Full OpenAPI 3.0.1 spec — **do not read whole file**; use `shogun spec` instead |
-| `local-dev-test-repo/specs/enigma-api-summary.txt` | Generated summary: `METHOD /path` pairs only — for quick listing |
+| `test-repo/shogun.config.yaml` | Config for the local test repo |
+| `test-repo/envs/local.env` | Local env vars — **gitignored**, copy from `.env.example` |
+| `test-repo/tests/collections/` | All test collections (one dir per domain) |
+| `test-repo/tests/suites/` | Named suites (`smoke.yaml`, `gets-all.yaml`) |
+| `test-repo/expected/` | Snapshot baselines — committed to git |
+| `test-repo/testing-plans/` | Human-written plans for each collection (living design docs) |
+| `test-repo/specs/` | OpenAPI spec and API summary for the target API |
+| `test-repo/specs/enigma-api.json` | Full OpenAPI 3.0.1 spec — **do not read whole file**; use `shogun spec` instead |
+| `test-repo/specs/enigma-api-summary.txt` | Generated summary: `METHOD /path` pairs only — for quick listing |
 
 ### Documentation (`docs/`)
 
@@ -196,18 +176,6 @@ The only valid statuses are `passed`, `failed`, and `needs_baseline`. There is n
 
 ---
 
-## Known API Quirks (local-dev-test-repo target)
-
-These are quirks of the **target API** (not shogun itself), documented here to save investigation time:
-
-- `DELETE /api/graph/links/{id}` returns **405** — links cannot be deleted via the API. Tests that attempt link deletion should assert 405 and are expected to leave links in place.
-- Graph node paths use **real slashes** in URL paths — do **not** `encodeURIComponent` the path separator.
-- `POST /api/graph/nodes` returns **200** (not 201) on creation.
-- `PATCH /api/graph/nodes/{path}` accepts body with fields to update (e.g., `{"title": "..."}`) and returns 200 with updated object.
-- Workspace must be loaded before graph data resolves — `POST /api/workspace/load/{name}` in collection setup.
-
----
-
 ## Build & Dev
 
 ```bash
@@ -225,6 +193,5 @@ npm run pkg:linux             # bun compile → bin/shogun-linux-x64
 
 ## What To Read Next
 
-- **If writing new tests**: read [`docs/testing-journal.md`](docs/testing-journal.md) and a testing plan in [`local-dev-test-repo/testing-plans/`](local-dev-test-repo/testing-plans/)
 - **If working on the engine**: read [`docs/technical/architecture.md`](docs/technical/architecture.md) then the relevant `src/` file
-- **If debugging a run**: check `local-dev-test-repo/runs/{timestamp}/summary.json` and the per-test `.log` files
+- **If debugging a run**: check `test-repo/runs/{timestamp}/summary.json` and the per-test `.log` files
