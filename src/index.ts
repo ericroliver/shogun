@@ -9,6 +9,9 @@ import { report } from './commands/report.js';
 import { lint } from './commands/lint.js';
 import { spec } from './commands/spec.js';
 import { coverage } from './commands/coverage.js';
+import { checkBackend } from './commands/check-backend.js';
+import { createBackend, getBackendSource } from './backend-factory.js';
+import { initExecutor, checkDependencies } from './executor.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
@@ -37,10 +40,16 @@ Usage:
   shogun run --suite smoke            Run a named suite
   shogun run --file path/to/test.yaml Run single test file
   shogun run --format json            JSON output (for CI)
+  shogun run --backend unix           Force unix backend (curl + jq)
+  shogun run --backend powershell     Force PowerShell backend
 
   shogun snapshot                     Capture/update all baselines
   shogun snapshot --suite api-testapp-1  Snapshot with suite vars (workspace etc.)
   shogun snapshot --file path/...     Update single test baseline
+  shogun snapshot --backend powershell
+
+  shogun check-backend                Show backend info + dependency status
+  shogun check-backend --backend unix
 
   shogun report                       Show last run report
   shogun report --run <timestamp>     Show specific run
@@ -78,6 +87,7 @@ interface ParsedArgs {
   format?: 'pretty' | 'json' | 'tap' | 'markdown';
   run?: string;
   cwd?: string;
+  backend?: string;
   // spec-specific
   specSource?: string;
   endpoint?: string;
@@ -103,6 +113,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       case '--format':     result.format = argv[++i] as ParsedArgs['format']; break;
       case '--run':        result.run = argv[++i]; break;
       case '--cwd':        result.cwd = argv[++i]; break;
+      case '--backend':    result.backend = argv[++i]; break;
       // spec flags
       case '--endpoint':   result.endpoint = argv[++i]; break;
       case '--method':     result.method = argv[++i]; break;
@@ -141,6 +152,21 @@ async function main() {
     process.chdir(args.cwd);
   }
 
+  // -----------------------------------------------------------------------
+  // Wire up backend for commands that need it (run, snapshot, lint)
+  // check-backend wires its own backend.
+  // -----------------------------------------------------------------------
+  const needsBackend = ['run', 'snapshot', 'lint'].includes(subcommand);
+
+  if (needsBackend) {
+    const backend = createBackend(args.backend);
+    initExecutor(backend);
+
+    if (subcommand !== 'lint') {
+      await checkDependencies();
+    }
+  }
+
   switch (subcommand) {
     case 'run': {
       const exitCode = await run({ ...args, format: args.format as 'pretty' | 'json' | 'tap' | undefined });
@@ -152,8 +178,13 @@ async function main() {
       process.exit(exitCode);
       break;
     }
+    case 'check-backend': {
+      const exitCode = await checkBackend({ backend: args.backend });
+      process.exit(exitCode);
+      break;
+    }
     case 'report': {
-      await report({ ...args, format: args.format as 'pretty' | 'json' | 'tap' | undefined });
+      await report({ ...args, format: args.format === 'markdown' ? 'pretty' : args.format as 'pretty' | 'json' | 'tap' | undefined });
       process.exit(0);
       break;
     }

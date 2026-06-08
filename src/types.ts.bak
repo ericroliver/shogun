@@ -179,20 +179,6 @@ export interface ShogunContext {
 }
 
 // ---------------------------------------------------------------------------
-// Assertion context (passed to assertion helpers / backends)
-// ---------------------------------------------------------------------------
-
-export interface AssertContext {
-  test: TestDefinition;
-  response: ShogunResponse;
-  config: ShogunConfig;
-  cwd: string;
-  collectionName?: string;
-  /** When true: write snapshot instead of diffing */
-  snapshotMode?: boolean;
-}
-
-// ---------------------------------------------------------------------------
 // Assertion results
 // ---------------------------------------------------------------------------
 

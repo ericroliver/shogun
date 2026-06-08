@@ -33,6 +33,7 @@
     "test:qa2": "tsx src/index.ts run --env QA-2",
     "pkg:macos": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile bin/shogun-macos-arm64 && cp bin/shogun-macos-arm64 bin/shogun",
     "pkg:linux": "bun build --compile --target=bun-linux-x64 src/index.ts --outfile bin/shogun-linux-x64",
+    "pkg:win": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile bin/shogun-win-x64",
     "pkg:all": "npm run pkg:macos && npm run pkg:linux"
   },
   "dependencies": {
