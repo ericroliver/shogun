@@ -22,14 +22,14 @@ Shogun sits on top of three rich data planes that have never been cross-referenc
 
 ```mermaid
 graph LR
-    A[OpenAPI Spec Plane] --> D[Coverage Engine]
-    B[Test Suite Plane] --> D
-    C[Run Results Plane] --> D
-    D --> E[Contract Coverage Report]
+    SPEC_PLANE[OpenAPI Spec Plane] --> COV_ENGINE[Coverage Engine]
+    TEST_PLANE[Test Suite Plane] --> COV_ENGINE
+    RUN_PLANE[Run Results Plane] --> COV_ENGINE
+    COV_ENGINE --> REPORT[Contract Coverage Report]
 
-    A1[Endpoints / params / body schemas / response codes] -.-> A
-    B1[Test YAML - method / path / expected status / shape assertions / scripts / tags] -.-> B
-    C1[run.json - actual HTTP status / durations / assertion pass-fail / script output] -.-> C
+    SPEC_DETAIL[Endpoints / params / body schemas / response codes] -.-> SPEC_PLANE
+    TEST_DETAIL[Test YAML - method / path / expected status / shape assertions / scripts / tags] -.-> TEST_PLANE
+    RUN_DETAIL[run.json - actual HTTP status / durations / assertion pass-fail / script output] -.-> RUN_PLANE
 ```
 
 | Plane | Source | What it tells us |
@@ -281,35 +281,35 @@ coverage(args)
 
 ```mermaid
 flowchart TD
-    subgraph Sources
-        SPEC[OpenAPI Spec JSON]
-        YAML[Test YAML files]
-        RUN[run.json optional]
+    subgraph SRC["Sources"]
+        OAPI[OpenAPI Spec JSON]
+        TESTS[Test YAML files]
+        RUNF[run.json optional]
     end
 
-    subgraph Extraction
+    subgraph EXT["Extraction"]
         SE[Spec Extractor V2]
         TC[Test Collector V2]
         RL[Run Loader]
     end
 
-    subgraph Analysis
+    subgraph ANA["Analysis"]
         MATCH[Path Matcher]
         ANALYZE[Coverage Analyzer]
         RISK[Risk Scorer]
         DEP[Dependency Graph]
     end
 
-    subgraph Output
+    subgraph OUT["Output"]
         PRETTY[Pretty Reporter]
         JSONR[JSON Reporter]
-        MD[Markdown Reporter]
+        MDREP[Markdown Reporter]
         GAPS[Gaps Reporter]
     end
 
-    SPEC --> SE
-    YAML --> TC
-    RUN --> RL
+    OAPI --> SE
+    TESTS --> TC
+    RUNF --> RL
 
     SE --> MATCH
     TC --> MATCH
@@ -321,7 +321,7 @@ flowchart TD
 
     RISK --> PRETTY
     RISK --> JSONR
-    RISK --> MD
+    RISK --> MDREP
     RISK --> GAPS
     DEP --> PRETTY
     DEP --> JSONR
@@ -450,9 +450,9 @@ Stories are ordered for incremental value. Each story builds on the previous but
 
 ```mermaid
 graph TD
-    S1[Story 1 - Enhanced Test Collection] --> S3
+    S1[Story 1 - Enhanced Test Collection] --> S3[Story 3 - Response Code Coverage]
     S2[Story 2 - Enhanced Spec Extraction] --> S3
-    S3[Story 3 - Response Code Coverage] --> S8
+    S3 --> S8[Story 8 - Detail Flag]
     S1 --> S4[Story 4 - Parameter Coverage]
     S2 --> S5[Story 5 - Body Field Coverage]
     S1 --> S6[Story 6 - Assertion Quality]
@@ -461,12 +461,12 @@ graph TD
     S5 --> S10
     S6 --> S10
     S10 --> S11[Story 11 - Risk Score]
-    S7[Story 7 - Grouped Output] --> S8[Story 8 - Detail Flag]
+    S7[Story 7 - Grouped Output] --> S8
     S9[Story 9 - Last-Run Bridge] --> S16[Story 16 - Spec Drift]
     S9 --> S14[Story 14 - Compare Runs]
     S11 --> S12[Story 12 - Negative Testing and Tags]
     S1 --> S13[Story 13 - Dependency Graph]
-    S15[Story 15 - CI Gate and JSON Fix]
+    S15[Story 15 - CI Gate and JSON Fix] --> S11
 ```
 
 **Recommended first wave** (foundations + highest value):
