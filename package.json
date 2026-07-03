@@ -1,6 +1,6 @@
 {
   "name": "shogun",
-  "version": "0.3.2",
+  "version": "0.3.7",
   "description": "Shell-first, TypeScript-enhanced API testing system",
   "type": "module",
   "bin": {

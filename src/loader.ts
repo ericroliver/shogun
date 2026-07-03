@@ -29,6 +29,7 @@ const ShogunConfigSchema = z.object({
     timeout: z.number().optional(),
     follow_redirects: z.boolean().optional(),
     content_type: z.string().optional(),
+    auto_inject_auth: z.boolean().optional(),
   }).optional(),
   paths: z.object({
     tests: z.string().optional(),

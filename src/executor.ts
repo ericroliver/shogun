@@ -14,6 +14,12 @@ import type { ShogunRequest, ShogunResponse, EnvVars } from './types.js';
 export interface ExecutorOptions {
   timeout?: number;
   followRedirects?: boolean;
+  /**
+   * When true (default), inject AUTH_TOKEN from env as `Authorization: Bearer <token>`
+   * on requests that do not already have an Authorization header.
+   * Pass false to disable — auth must be wired explicitly in pre-scripts.
+   */
+  autoInjectAuth?: boolean;
 }
 
 /**
@@ -44,7 +50,13 @@ export async function executeRequest(
     ...req.headers,
   };
 
-  if (env.AUTH_TOKEN && !headers['Authorization']) {
+  // Auto-inject AUTH_TOKEN as Bearer only when:
+  //   1. auto_inject_auth is not explicitly disabled (default: true)
+  //   2. AUTH_TOKEN is present in env
+  //   3. The request does not already have an Authorization header set
+  //      (uses hasOwnProperty so an explicit empty-string value suppresses injection)
+  const autoInject = opts.autoInjectAuth !== false;
+  if (autoInject && env.AUTH_TOKEN && !Object.prototype.hasOwnProperty.call(headers, 'Authorization')) {
     const token = env.AUTH_TOKEN;
     headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
