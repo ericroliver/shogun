@@ -307,6 +307,19 @@ export interface ShogunConfig {
     timeout?: number;
     follow_redirects?: boolean;
     content_type?: string;
+    /**
+     * When true (default), shogun automatically injects AUTH_TOKEN from the env
+     * file as an `Authorization: Bearer <token>` header on every request that
+     * does not already have an Authorization header set.
+     *
+     * Set to false to disable auto-injection entirely. Auth must then be wired
+     * explicitly in each collection's setup script via ctx.vars.authHeader and
+     * applied in each test's pre-script. This is the recommended approach for
+     * test suites that include unauthenticated guard tests.
+     *
+     * Default: true (preserves backward-compatible behaviour)
+     */
+    auto_inject_auth?: boolean;
   };
   paths?: {
     tests?: string;

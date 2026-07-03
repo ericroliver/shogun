@@ -22,6 +22,7 @@
 13. [ctx.http vs curl](#13-ctxhttp-vs-curl)
 14. [Testing Plans as Living Docs](#14-testing-plans-as-living-docs)
 15. [Tests Must Surface Bugs, Not Hide Them](#15-tests-must-surface-bugs-not-hide-them)
+16. [Unauthenticated Guard Tests](#16-unauthenticated-guard-tests)
 
 ---
 
@@ -478,6 +479,78 @@ If you discover an endpoint is missing (e.g., no DELETE for a resource that shou
 | `graph/modify-graph-node.yaml` | Hardcoded 405 as "expected" when PATCH is actually supported | Now asserts 200 with body inspection |
 | `graph/delete-graph-link.yaml` | No `ctx.assert` at all — any status code silently passed | Now asserts exactly 405 (confirmed limitation) |
 | `fs/get-fs-verify.yaml` | Post-script had dead `if (status === 404) { return; }` path that contradicted `status: 200` | Removed dead path; assert 200 only |
+
+---
+
+## 16. Unauthenticated Guard Tests
+
+Guard tests verify that an endpoint correctly rejects requests with no credentials (expected 401) or insufficient credentials (expected 403). These tests **must not** carry an auth header.
+
+### The Problem: AUTH_TOKEN Auto-Injection
+
+By default, shogun auto-injects `AUTH_TOKEN` from the env file as `Authorization: Bearer <token>` on every request that doesn't already have an `Authorization` header. This means a guard test written without any auth header will silently receive a valid token and pass for the wrong reason.
+
+### Solution A — Disable Auto-Injection in Config (Recommended)
+
+Set `auto_inject_auth: false` in `shogun.config.yaml`. Auth is then **never** injected automatically — every collection that needs auth must wire it explicitly in `setup` + `pre` scripts (see [Section 1](#1-auth-wiring)).
+
+```yaml
+# shogun.config.yaml
+defaults:
+  auto_inject_auth: false
+```
+
+This is the correct long-term approach for any test suite that includes guard tests. It makes auth explicit and auditable — you can see exactly which tests carry credentials.
+
+### Solution B — Explicit Empty Override in Pre-Script (Per-Test)
+
+If you cannot change the global config (e.g. another team depends on auto-injection), suppress injection for a specific test by setting `Authorization` to an empty string in the `pre` script:
+
+```javascript
+// pre-script for an unauthenticated guard test:
+// Explicitly set Authorization to '' — hasOwnProperty check in executor
+// sees the key exists and skips auto-injection.
+ctx.request.headers['Authorization'] = '';
+```
+
+> **Why this works now:** The executor uses `Object.prototype.hasOwnProperty.call(headers, 'Authorization')` to check for an existing header. An empty string `''` is falsy, but the key *exists* — so injection is skipped. Prior to this fix, the check was `!headers['Authorization']`, which treated `''` as absent and injected anyway.
+
+### What Does NOT Work
+
+```javascript
+// ❌ This does NOT suppress injection — delete removes the key entirely,
+//    so hasOwnProperty returns false and injection fires.
+delete ctx.request.headers['Authorization'];
+
+// ❌ This also does NOT work — null is not a string, the key won't be
+//    present in the Record<string, string> headers map.
+ctx.request.headers['Authorization'] = null;
+```
+
+### Guard Test Pattern
+
+```yaml
+# guard-unauthenticated.yaml
+name: Reject unauthenticated request
+request:
+  method: GET
+  path: /api/protected-resource
+response:
+  status: 401
+  snapshot: false
+pre: |
+  // Suppress auto-injection for this guard test
+  ctx.request.headers['Authorization'] = '';
+```
+
+For authenticated tests in the same collection, apply auth normally in the pre-script:
+
+```javascript
+// pre-script for an authenticated test:
+if (ctx.vars.authHeader) {
+  ctx.request.headers['Authorization'] = ctx.vars.authHeader;
+}
+```
 
 ---
 
