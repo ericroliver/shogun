@@ -4,15 +4,19 @@
  * PowerShell backend — uses PowerShell cmdlets instead of curl/jq/diff.
  *
  * Tools used:
- *   - Invoke-RestMethod  → HTTP execution
- *   - ConvertFrom-Json     → JSON parsing
- *   - Compare-Object       → diff (with Node.js fallback)
+ *   - Invoke-WebRequest  → HTTP execution (with session/cookie support)
+ *   - ConvertFrom-Json   → JSON parsing
+ *   - Compare-Object     → diff (with Node.js fallback)
  *
- * NOTE: This is a NEW implementation. It does NOT reuse curl/jq/diff.
- *       Assertion syntax is PowerShell-native (not jq).
+ * Key features:
+ *   - Cookie/session persistence across requests via WebSession
+ *   - Form-encoded body support (hashtable → URL-encoded)
+ *   - HTML/non-JSON response handling (base64 body transport)
+ *   - Proper escaping for single-quoted and double-quoted PS strings
  */
 
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import type {
   ShogunRequest,
   ShogunResponse,
@@ -32,17 +36,58 @@ import type {
 } from '../backend-interface.js';
 
 // ===========================================================================
+// Types
+// ===========================================================================
+
+export interface CookieEntry {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+}
+
+// ===========================================================================
 // Pure helper functions — exported for unit testing
 // ===========================================================================
 
+/**
+ * Escape a string for use in a PowerShell single-quoted string.
+ * Only single quotes need escaping (doubled: ' → '').
+ * Double quotes and $ are literal in single-quoted strings — no escaping needed.
+ */
 export function escapeForPowerShell(str: string): string {
-  return str.replace(/'/g, "''").replace(/"/g, '`"');
+  return str.replace(/'/g, "''");
 }
 
+/**
+ * Escape a string for use in a PowerShell double-quoted string.
+ * Escapes " (→ `") and $ (→ `$) which are interpolation characters.
+ * Single quotes are literal in double-quoted strings — no escaping needed.
+ */
+export function escapeForDoubleQuoted(str: string): string {
+  return str.replace(/"/g, '`"').replace(/\$/g, '`$');
+}
+
+/**
+ * Escape a string for use in a PowerShell here-string (@' ... '@).
+ * Only single quotes need escaping (doubled: ' → '').
+ */
 export function escapeHereString(str: string): string {
   return str.replace(/'/g, "''");
 }
 
+/**
+ * Parse the structured output from the PowerShell script.
+ *
+ * Protocol lines:
+ *   STATUS:<code>       — HTTP status code
+ *   HEADERS:<json>      — Response headers as compressed JSON
+ *   B64BODY:<base64>    — Response body, base64-encoded (handles multi-line HTML)
+ *   COOKIES:<json>      — Cookie jar as JSON array
+ *   ERROR:<message>     — Error message (when status is 0 or error occurred)
+ *
+ * Also supports legacy BODY:<raw> for backward compatibility (single-line only).
+ */
 export function parsePowerShellResponse(output: string, duration: number): ShogunResponse {
   const lines = output.split('\n');
   let status = 0;
@@ -55,11 +100,21 @@ export function parsePowerShellResponse(output: string, duration: number): Shogu
     } else if (line.startsWith('HEADERS:')) {
       try {
         const h = JSON.parse(line.slice(8));
-        for (const [k, v] of Object.entries(h)) {
-          headers[(k as string).toLowerCase()] = String(v);
+        if (h && typeof h === 'object') {
+          for (const [k, v] of Object.entries(h)) {
+            headers[(k as string).toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v);
+          }
         }
       } catch { /* ignore */ }
+    } else if (line.startsWith('B64BODY:')) {
+      const b64 = line.slice(8);
+      try {
+        bodyRaw = Buffer.from(b64, 'base64').toString('utf8');
+      } catch {
+        bodyRaw = '';
+      }
     } else if (line.startsWith('BODY:')) {
+      // Legacy: raw body (single line only, for backward compat)
       bodyRaw = line.slice(5);
     } else if (line.startsWith('ERROR:')) {
       bodyRaw = line.slice(6);
@@ -83,6 +138,27 @@ export function parsePowerShellResponse(output: string, duration: number): Shogu
   };
 }
 
+/**
+ * Parse cookies from the PowerShell output's COOKIES: line.
+ * Returns an empty array if no COOKIES line or invalid JSON.
+ */
+export function parseCookies(output: string): CookieEntry[] {
+  for (const line of output.split('\n')) {
+    if (line.startsWith('COOKIES:')) {
+      try {
+        const parsed = JSON.parse(line.slice(8));
+        if (Array.isArray(parsed)) {
+          return parsed as CookieEntry[];
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  return [];
+}
+
+/**
+ * Build the full URL including query params.
+ */
 export function buildPsUrl(req: ShogunRequest): string {
   let url = req.url;
   const params = req.params;
@@ -95,36 +171,95 @@ export function buildPsUrl(req: ShogunRequest): string {
   return url;
 }
 
-export function buildPsHeaders(req: ShogunRequest, env: EnvVars): Record<string, string> {
+/**
+ * Build the headers object, merging defaults, request headers, and optional auth.
+ */
+export function buildPsHeaders(
+  req: ShogunRequest,
+  env: EnvVars,
+  autoInjectAuth: boolean = true,
+): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
     ...req.headers,
   };
-  if (env.AUTH_TOKEN && !headers['Authorization']) {
+  if (autoInjectAuth && env.AUTH_TOKEN && !headers['Authorization']) {
     const token = env.AUTH_TOKEN;
     headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
   return headers;
 }
 
+/**
+ * Format headers as PowerShell assignments using double-quoted strings.
+ * Uses escapeForDoubleQuoted to properly escape " and $ in header values.
+ */
 export function formatHeadersForPowerShell(headers: Record<string, string>): string {
   return Object.entries(headers)
-    .map(([k, v]) => `$headers["${k}"] = "${escapeForPowerShell(v)}"`)
+    .map(([k, v]) => `$headers["${k}"] = "${escapeForDoubleQuoted(v)}"`)
     .join('\n      ');
 }
 
+/**
+ * Build the PowerShell body assignment for the request.
+ *
+ * Resolution:
+ *   1. If body is a RequestBody object ({ inline: ... } or { file: ... }), resolve it
+ *   2. If Content-Type is form-encoded and body is an object, build a PS hashtable
+ *   3. Otherwise, JSON-stringify and use single-quoted string
+ */
 export function buildBodyArg(req: ShogunRequest): string {
   if (req.body === undefined || req.body === null) return '';
-  const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-  return `$splat.Body = '${escapeForPowerShell(bodyStr)}'`;
+
+  // Resolve body from inline/file wrapper (RequestBody schema from YAML)
+  let body: unknown = req.body;
+  if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+    const rb = body as { inline?: unknown; file?: string };
+    if (rb.inline !== undefined) {
+      body = rb.inline;
+    } else if (rb.file !== undefined) {
+      try {
+        body = readFileSync(rb.file, 'utf8');
+      } catch {
+        body = '';
+      }
+    }
+  }
+
+  if (body === undefined || body === null || body === '') return '';
+
+  // Check Content-Type for form-encoded
+  const contentType = req.headers?.['Content-Type'] ?? req.headers?.['content-type'] ?? '';
+  const isFormEncoded = contentType.toLowerCase().includes('application/x-www-form-urlencoded');
+
+  if (isFormEncoded && typeof body === 'object' && body !== null && !Array.isArray(body)) {
+    // Build URL-encoded form body string for HttpWebRequest
+    const entries = Object.entries(body as Record<string, unknown>);
+    if (entries.length === 0) return '';
+    const pairs = entries
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join('&');
+    // $bodyStr is used later in the HttpWebRequest script
+    return `$bodyStr = '${escapeForPowerShell(pairs)}'`;
+  }
+
+  // JSON body (string or object) — single-quoted string
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+  return `$bodyStr = '${escapeForPowerShell(bodyStr)}'`;
 }
 
+/**
+ * Convert an ignore field spec to PowerShell property removal.
+ */
 export function convertIgnoreFieldToPowerShell(field: string): string {
   const key = field.startsWith('.') ? field.slice(1) : field;
   return `$json.PSObject.Properties.Remove("${key}")`;
 }
 
+/**
+ * Node.js-based diff (fallback or primary). Produces unified-diff-like output.
+ */
 export function formatSimpleDiff(expected: string, actual: string): string {
   const expLines = expected.split('\n');
   const actLines = actual.split('\n');
@@ -152,8 +287,24 @@ export function formatSimpleDiff(expected: string, actual: string): string {
 export class PowerShellBackend implements BackendExecutor {
   readonly name = 'powershell' as const;
 
+  /** Cookie jar — persisted across requests within a single run */
+  private cookies: CookieEntry[] = [];
+
+  /** Clear all stored cookies (for teardown/reset) */
+  clearCookies(): void {
+    this.cookies = [];
+  }
+
+  /** Get current cookies (for inspection/debugging) */
+  getCookies(): CookieEntry[] {
+    return [...this.cookies];
+  }
+
   // =======================================================================
-  // HTTP execution — Invoke-RestMethod
+  // HTTP execution — Invoke-WebRequest with -WebSession for cookie persistence
+  // (Proven pattern from reference capture-customer-openitems.ps1 script.
+  //  WebSession is reconstructed from the cookie jar on each call since
+  //  each PowerShell invocation is a separate process.)
   // =======================================================================
 
   async executeRequest(
@@ -162,59 +313,169 @@ export class PowerShellBackend implements BackendExecutor {
     opts: ExecutorOptions = {},
   ): Promise<ShogunResponse> {
     const timeout = opts.timeout ?? parseInt(env.TIMEOUT ?? '10', 10);
-    const url = this.buildUrl(req);
-    const method = req.method;
-    const headers = this.buildHeaders(req, env);
-
-    const bodyArg = this.buildBodyArg(req);
+    const maxRedirs = opts.followRedirects === false ? 0 : 5;
+    const url = buildPsUrl(req);
+    const method = req.method.toUpperCase();
+    const headers = buildPsHeaders(req, env, opts.autoInjectAuth !== false);
+    const bodyArg = buildBodyArg(req);
+    const cookiesJson = JSON.stringify(this.cookies);
 
     const psScript = `
-      $ErrorActionPreference = "Stop"
-      
-      $headers = @{}
-      ${this.formatHeadersForPowerShell(headers)}
-      
-      $uri = "${this.escapeForPowerShell(url)}"
-      $method = "${method}"
-      $timeoutSec = ${timeout}
-      
+$ErrorActionPreference = "Stop"
+
+# Build headers hashtable
+$headers = @{}
+${formatHeadersForPowerShell(headers)}
+
+# Reconstruct WebSession from stored cookies (each PS call is a separate process)
+$cookiesJson = '${escapeForPowerShell(cookiesJson)}'
+$session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+if ($cookiesJson -ne '[]' -and $cookiesJson -ne '') {
+  try {
+    $cookieList = $cookiesJson | ConvertFrom-Json
+    foreach ($c in $cookieList) {
       try {
-        $splat = @{
-          Uri         = $uri
-          Method      = $method
-          Headers     = $headers
-          TimeoutSec  = $timeoutSec
-          ResponseHeadersVariable = "responseHeaders"
-          StatusCodeVariable       = "statusCode"
-          MaximumRedirection      = 5
-        }
-        
-        ${bodyArg}
-        
-        $response = Invoke-RestMethod @splat
-        $bodyJson = $response | ConvertTo-Json -Depth 100 -Compress
-        
-        Write-Output "STATUS:$statusCode"
-        Write-Output "HEADERS:$($responseHeaders | ConvertTo-Json -Compress)"
-        Write-Output "BODY:$bodyJson"
-      } catch {
-        $statusCode = $_.Exception.Response.StatusCode.Value__
-        if (-not $statusCode) { $statusCode = 0 }
-        
-        $errorBody = $_.ErrorDetails.Message
-        if (-not $errorBody) { $errorBody = $_.Exception.Message }
-        
-        Write-Output "STATUS:$statusCode"
-        Write-Output "ERROR:$errorBody"
-        exit 0
+        $session.Cookies.Add([System.Net.Cookie]::new([string]$c.name, [string]$c.value, [string]$c.path, [string]$c.domain))
+      } catch {}
+    }
+  } catch {}
+}
+
+$uri = '${escapeForPowerShell(url)}'
+$method = '${method}'
+$timeoutSec = ${timeout}
+$maxRedirs = ${maxRedirs}
+
+${bodyArg}
+
+# Extract Content-Type from headers (Invoke-WebRequest prefers -ContentType parameter)
+$contentType = $null
+$ctKey = $null
+foreach ($key in @($headers.Keys)) {
+  if ($key -ieq 'Content-Type') {
+    $contentType = [string]$headers[$key]
+    $ctKey = $key
+  }
+}
+if ($ctKey) { $headers.Remove($ctKey) }
+
+# Build Invoke-WebRequest parameters (splatting)
+$params = @{
+  Uri = $uri
+  Method = $method
+  WebSession = $session
+  TimeoutSec = $timeoutSec
+  UseBasicParsing = $true
+  Headers = $headers
+  MaximumRedirection = $maxRedirs
+}
+
+if ($contentType) {
+  $params.ContentType = $contentType
+}
+
+# Add body if present
+if ($bodyStr) {
+  $params.Body = $bodyStr
+}
+
+$statusCode = 0
+$bodyContent = ''
+$responseHeaders = @{}
+
+try {
+  $response = Invoke-WebRequest @params
+  $statusCode = [int]$response.StatusCode
+  $bodyContent = $response.Content
+
+  # Collect response headers
+  foreach ($key in $response.Headers.Keys) {
+    $responseHeaders[$key] = ($response.Headers[$key] -join ', ')
+  }
+} catch {
+  # PowerShell 5.1 throws on non-2xx status codes
+  if ($_.Exception.Response) {
+    $statusCode = [int]$_.Exception.Response.StatusCode
+    try {
+      $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+      $bodyContent = $reader.ReadToEnd()
+      $reader.Close()
+    } catch {
+      $bodyContent = $_.Exception.Message
+    }
+    try {
+      foreach ($key in $_.Exception.Response.Headers.AllKeys) {
+        $responseHeaders[$key] = ($_.Exception.Response.Headers.GetValues($key) -join ', ')
       }
-    `;
+    } catch {}
+  } else {
+    $bodyContent = $_.Exception.Message
+  }
+}
+
+# Extract cookies from session (updated by Invoke-WebRequest automatically)
+$cookieArray = @()
+try {
+  $uriObj = [System.Uri]$uri
+  $sessionCookies = $session.Cookies.GetCookies($uriObj)
+  foreach ($c in $sessionCookies) {
+    $cookieArray += @{ name = $c.Name; value = $c.Value; domain = $c.Domain; path = $c.Path }
+  }
+} catch {}
+
+# Also carry forward existing cookies not returned in this response
+if ($cookiesJson -ne '[]' -and $cookiesJson -ne '') {
+  try {
+    $existing = $cookiesJson | ConvertFrom-Json
+    foreach ($c in $existing) {
+      $alreadyHave = $false
+      foreach ($nc in $cookieArray) {
+        if ($nc.name -eq $c.name) { $alreadyHave = $true; break }
+      }
+      if (-not $alreadyHave) {
+        $cookieArray += @{ name = [string]$c.name; value = [string]$c.value; domain = [string]$c.domain; path = [string]$c.path }
+      }
+    }
+  } catch {}
+}
+
+if ($cookieArray.Count -eq 0) {
+  $cookieJson = '[]'
+} elseif ($cookieArray.Count -eq 1) {
+  $cookieJson = '[' + ($cookieArray[0] | ConvertTo-Json -Compress) + ']'
+} else {
+  $cookieJson = $cookieArray | ConvertTo-Json -Compress
+}
+
+# Base64 encode body for safe transport (handles multi-line HTML)
+$bodyB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bodyContent))
+
+# Serialize headers
+$headersJson = '{}'
+try {
+  if ($responseHeaders -and $responseHeaders.Count -gt 0) {
+    $headersJson = $responseHeaders | ConvertTo-Json -Compress
+    if ($headersJson -isnot [string]) { $headersJson = '{}' }
+  }
+} catch {}
+
+Write-Output "STATUS:$statusCode"
+Write-Output "HEADERS:$headersJson"
+Write-Output "B64BODY:$bodyB64"
+Write-Output "COOKIES:$cookieJson"
+`;
 
     const startTime = Date.now();
     const output = await this.spawnPowerShell(psScript);
     const duration = Date.now() - startTime;
 
-    return this.parsePowerShellResponse(output, duration);
+    // Parse response
+    const response = parsePowerShellResponse(output, duration);
+
+    // Update cookie jar from response
+    this.cookies = parseCookies(output);
+
+    return response;
   }
 
   // =======================================================================
@@ -224,7 +485,7 @@ export class PowerShellBackend implements BackendExecutor {
   async runJsonQuery(json: string, expression: string): Promise<QueryResult> {
     const psScript = `
       try {
-        $json = '${this.escapeForPowerShell(json)}' | ConvertFrom-Json
+        $json = '${escapeForPowerShell(json)}' | ConvertFrom-Json
         $result = ${expression}
         
         if ($result -is [bool]) {
@@ -247,8 +508,8 @@ export class PowerShellBackend implements BackendExecutor {
       const output = await this.spawnPowerShell(psScript);
       const passed = output.trim().toLowerCase() === 'true';
       return { passed };
-    } catch (err: any) {
-      return { passed: false, error: err.message };
+    } catch (err: unknown) {
+      return { passed: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -276,7 +537,7 @@ export class PowerShellBackend implements BackendExecutor {
     if (!raw.trim()) return '';
 
     const ignoreLines = ignoreFields
-      .map(f => this.convertIgnoreFieldToPowerShell(f))
+      .map(f => convertIgnoreFieldToPowerShell(f))
       .join('\n');
 
     const psScript = `
@@ -295,13 +556,13 @@ export class PowerShellBackend implements BackendExecutor {
       }
 
       try {
-        $json = '${this.escapeForPowerShell(raw)}' | ConvertFrom-Json
+        $json = '${escapeForPowerShell(raw)}' | ConvertFrom-Json
         ${ignoreLines}
         $sorted = Sort-JsonKeys $json
         $output = $sorted | ConvertTo-Json -Depth 100
         Write-Output $output
       } catch {
-        Write-Output '${this.escapeForPowerShell(raw)}'
+        Write-Output '${escapeForPowerShell(raw)}'
       }
     `;
 
@@ -320,11 +581,11 @@ export class PowerShellBackend implements BackendExecutor {
   async runDiff(expected: string, actual: string): Promise<string> {
     const psScript = `
       $expectedLines = @'
-${this.escapeHereString(expected)}
+${escapeHereString(expected)}
 '@ -split "\\r?\\n"
 
       $actualLines = @'
-${this.escapeHereString(actual)}
+${escapeHereString(actual)}
 '@ -split "\\r?\\n"
 
       $diff = Compare-Object $expectedLines $actualLines -CaseSensitive
@@ -349,7 +610,7 @@ ${this.escapeHereString(actual)}
       const result = output.trim();
       return result;
     } catch {
-      return this.formatSimpleDiff(expected, actual);
+      return formatSimpleDiff(expected, actual);
     }
   }
 
@@ -424,11 +685,11 @@ ${this.escapeHereString(actual)}
     const results: DependencyCheck[] = [];
 
     try {
-      await this.spawnPowerShell('$PSVersionTable.PSVersion.ToString()');
+      const version = await this.spawnPowerShell('$PSVersionTable.PSVersion.ToString()');
       results.push({
         name: 'powershell.exe',
         found: true,
-        version: '7.x',
+        version: version.trim(),
         optional: false,
       });
     } catch {
@@ -439,8 +700,9 @@ ${this.escapeHereString(actual)}
       });
     }
 
+    // Invoke-WebRequest is a built-in cmdlet — always available
     results.push({
-      name: 'Invoke-RestMethod',
+      name: 'Invoke-WebRequest',
       found: true,
       optional: false,
     });
@@ -475,116 +737,6 @@ ${this.escapeHereString(actual)}
     });
   }
 
-  private parsePowerShellResponse(output: string, duration: number): ShogunResponse {
-    const lines = output.split('\n');
-    let status = 0;
-    const headers: Record<string, string> = {};
-    let bodyRaw = '';
-
-    for (const line of lines) {
-      if (line.startsWith('STATUS:')) {
-        status = parseInt(line.slice(7), 10) || 0;
-      } else if (line.startsWith('HEADERS:')) {
-        try {
-          const h = JSON.parse(line.slice(8));
-          for (const [k, v] of Object.entries(h)) {
-            headers[(k as string).toLowerCase()] = String(v);
-          }
-        } catch { /* ignore */ }
-      } else if (line.startsWith('BODY:')) {
-        bodyRaw = line.slice(5);
-      } else if (line.startsWith('ERROR:')) {
-        bodyRaw = line.slice(6);
-      }
-    }
-
-    let body: unknown = bodyRaw;
-    try {
-      if (bodyRaw.trim().startsWith('{') || bodyRaw.trim().startsWith('[')) {
-        body = JSON.parse(bodyRaw);
-      }
-    } catch { /* keep as string */ }
-
-    return {
-      status,
-      headers,
-      body,
-      raw: bodyRaw,
-      duration,
-      curlMs: duration,
-    };
-  }
-
-  private buildUrl(req: ShogunRequest): string {
-    let url = req.url;
-    const params = req.params;
-    if (params && Object.keys(params).length > 0) {
-      const qs = new URLSearchParams(
-        Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
-      ).toString();
-      url += (url.includes('?') ? '&' : '?') + qs;
-    }
-    return url;
-  }
-
-  private buildHeaders(req: ShogunRequest, env: EnvVars): Record<string, string> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      ...req.headers,
-    };
-    if (env.AUTH_TOKEN && !headers['Authorization']) {
-      const token = env.AUTH_TOKEN;
-      headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
-    }
-    return headers;
-  }
-
-  private formatHeadersForPowerShell(headers: Record<string, string>): string {
-    return Object.entries(headers)
-      .map(([k, v]) => `$headers["${k}"] = "${this.escapeForPowerShell(v)}"`)
-      .join('\n      ');
-  }
-
-  private buildBodyArg(req: ShogunRequest): string {
-    if (req.body === undefined || req.body === null) return '';
-    const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-    return `$splat.Body = '${this.escapeForPowerShell(bodyStr)}'`;
-  }
-
-  private escapeForPowerShell(str: string): string {
-    return str.replace(/'/g, "''").replace(/"/g, '`"');
-  }
-
-  private escapeHereString(str: string): string {
-    return str.replace(/'/g, "''");
-  }
-
-  private convertIgnoreFieldToPowerShell(field: string): string {
-    const key = field.startsWith('.') ? field.slice(1) : field;
-    return `$json.PSObject.Properties.Remove("${key}")`;
-  }
-
-  private formatSimpleDiff(expected: string, actual: string): string {
-    const expLines = expected.split('\n');
-    const actLines = actual.split('\n');
-    const maxLen = Math.max(expLines.length, actLines.length);
-    const diffLines: string[] = ['--- expected', '+++ actual'];
-    let hasDiff = false;
-    for (let i = 0; i < maxLen; i++) {
-      const e = expLines[i];
-      const a = actLines[i];
-      if (e !== a) {
-        hasDiff = true;
-        if (e !== undefined) diffLines.push(`- ${e}`);
-        if (a !== undefined) diffLines.push(`+ ${a}`);
-      } else {
-        diffLines.push(`  ${e}`);
-      }
-    }
-    return hasDiff ? diffLines.join('\n') : '';
-  }
-
   private getExpectedPath(ctx: AssertContext): string {
     return this.getExpectedPathFromTest(
       ctx.test as TestDefinition,
@@ -597,7 +749,7 @@ ${this.escapeHereString(actual)}
   private getExpectedPathFromTest(
     test: TestDefinition,
     config: ShogunConfig,
-    cwd = process.cwd(),
+    cwd: string = process.cwd(),
     collectionName?: string,
   ): string {
     const path = require('node:path');

@@ -161,7 +161,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
       // Resolve the canonical ID from the actual file path — handles cross-collection
       // refs stored in _failures_ / _debug_ collections where collectionName is the
       // container collection but the file lives under a different collection dir.
-      const canonicalId = relative(collectionsDir, file).replace(/\.yaml$/, '');
+      const canonicalId = relative(collectionsDir, file).replace(/\.yaml$/, '').replace(/\\/g, '/');
       const actualCollection = canonicalId.includes('/')
         ? canonicalId.slice(0, canonicalId.indexOf('/'))
         : collectionName;
@@ -502,7 +502,7 @@ async function runSingleTest(
   let response: ShogunResponse;
   try {
     response = await executeRequest(request, opts.env, {
-      timeout: parseInt(opts.env.TIMEOUT ?? '10', 10),
+      timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
     });
   } catch (err) {
@@ -617,7 +617,7 @@ function updateFailuresCollection(
     .map(r => {
       // r.file is an absolute path like: …/collections/some-coll/test-name.yaml
       // We want: "some-coll/test-name"
-      const rel = relative(collectionsDir, r.file);          // "some-coll/test-name.yaml"
+      const rel = relative(collectionsDir, r.file).replace(/\\/g, '/');  // "some-coll/test-name.yaml"
       return rel.replace(/\.yaml$/, '');                     // "some-coll/test-name"
     })
     // Deduplicate (shouldn't happen, but be safe)

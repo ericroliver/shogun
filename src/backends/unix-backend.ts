@@ -102,14 +102,18 @@ export async function executeRequest(
     writeFileSync(bodyInFile, bodyStr, 'utf8');
     const verified = readFileSync(bodyInFile, 'utf8');
     const verifiedBytes = Buffer.byteLength(verified, 'utf8');
-    process.stderr.write(
-      `[unix-backend] body-write: ${byteLen} bytes\n` +
-      `[unix-backend] body-verify: ${verifiedBytes} bytes\n` +
-      `[unix-backend] body-file: ${bodyInFile}\n`
-    );
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(
+        `[unix-backend] body-write: ${byteLen} bytes\n` +
+        `[unix-backend] body-verify: ${verifiedBytes} bytes\n` +
+        `[unix-backend] body-file: ${bodyInFile}\n`
+      );
+    }
     curlArgs.push('--data-binary', `@${bodyInFile}`);
   }
-  process.stderr.write(`[unix-backend] curl-args: ${JSON.stringify(curlArgs)}\n`);
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[unix-backend] curl-args: ${JSON.stringify(curlArgs)}\n`);
+  }
 
   const startTime = Date.now();
 

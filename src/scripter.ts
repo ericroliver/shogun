@@ -115,7 +115,7 @@ const ctx = {
 
   log(message: string): void {
     __logs.push(String(message));
-    process.stderr.write('[script] ' + String(message) + '\\n');
+    if (process.env.SHOGUN_DEBUG) { process.stderr.write('[script] ' + String(message) + '\\n'); }
   },
 
   http: {
@@ -208,7 +208,8 @@ async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
 
   return new Promise((resolve) => {
     // Use tsx to execute the TypeScript script
-    const proc = spawn('npx', ['tsx', scriptFile], {
+    const isWin = process.platform === 'win32';
+    const proc = spawn(isWin ? 'npx.cmd' : 'npx', ['tsx', scriptFile], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
     });
