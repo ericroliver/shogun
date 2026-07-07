@@ -300,6 +300,62 @@ export interface SpecConfig {
   path: string;
 }
 
+// ---------------------------------------------------------------------------
+// Coverage configuration (shogun.config.yaml → coverage:)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-dimension risk-score weights for the coverage risk score (Story 12).
+ * Values are normalized at analysis time; they do not need to sum to 1.0.
+ */
+export interface CoverageRiskWeights {
+  /** Weight for response-code coverage gaps. Default: 0.35 */
+  responseCodeGap: number;
+  /** Weight for parameter coverage gaps. Default: 0.15 */
+  parameterGap: number;
+  /** Weight for request body field coverage gaps. Default: 0.15 */
+  bodyFieldGap: number;
+  /** Weight for assertion quality deficit. Default: 0.20 */
+  assertionQuality: number;
+  /** Weight for run-result failures (only when --last-run is used). Default: 0.15 */
+  runResults: number;
+}
+
+/**
+ * Per-dimension coverage thresholds (0–100) for the `--min-coverage` CI gate.
+ * Omit a dimension to skip checking it.
+ */
+export interface CoverageMinThresholds {
+  endpoint?: number;
+  responseCode?: number;
+  parameter?: number;
+  bodyField?: number;
+}
+
+/**
+ * Optional `coverage:` block in shogun.config.yaml. All keys are optional;
+ * sensible defaults ship out of the box so existing repos need zero config
+ * changes to get v2 coverage behavior.
+ */
+export interface CoverageConfig {
+  /** When --last-run is used without --suite, filter to this suite's runs. */
+  defaultSuite?: string;
+  /** Per-dimension risk-score weights (partial — merged over defaults). */
+  riskWeights?: Partial<CoverageRiskWeights>;
+  /** Method → expected test tags. Endpoints missing expected tags are flagged. */
+  expectedTagsByMethod?: Record<string, string[]>;
+  /** Per-dimension coverage thresholds for --min-coverage CI gate. */
+  minCoverage?: CoverageMinThresholds;
+  /**
+   * Status codes to suppress from per-endpoint spec-drift output.
+   * Useful for cross-cutting concerns like 401 (JWT middleware) that apply
+   * globally and would otherwise flood the drift report. Suppressed codes
+   * are summarised once as a global note instead of per-endpoint.
+   * Default: ['401']
+   */
+  suppressDrift?: string[];
+}
+
 export interface ShogunConfig {
   version: number;
   defaults?: {
@@ -338,6 +394,8 @@ export interface ShogunConfig {
   };
   /** OpenAPI spec source configuration */
   spec?: SpecConfig;
+  /** Coverage report v2 configuration. All keys optional. */
+  coverage?: CoverageConfig;
 }
 
 // ---------------------------------------------------------------------------

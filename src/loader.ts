@@ -16,11 +16,36 @@ import type {
   CollectionDefinition,
   SuiteDefinition,
   SetupFixtureDefinition,
+  CoverageConfig,
+  CoverageRiskWeights,
+  CoverageMinThresholds,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Global config
 // ---------------------------------------------------------------------------
+
+const CoverageRiskWeightsSchema = z.object({
+  responseCodeGap: z.number().optional(),
+  parameterGap: z.number().optional(),
+  bodyFieldGap: z.number().optional(),
+  assertionQuality: z.number().optional(),
+  runResults: z.number().optional(),
+}).optional();
+
+const CoverageMinThresholdsSchema = z.object({
+  endpoint: z.number().optional(),
+  responseCode: z.number().optional(),
+  parameter: z.number().optional(),
+  bodyField: z.number().optional(),
+}).optional();
+
+const CoverageConfigSchema = z.object({
+  defaultSuite: z.string().optional(),
+  riskWeights: CoverageRiskWeightsSchema,
+  expectedTagsByMethod: z.record(z.array(z.string())).optional(),
+  minCoverage: CoverageMinThresholdsSchema,
+}).passthrough();
 
 const ShogunConfigSchema = z.object({
   version: z.number(),
@@ -48,6 +73,7 @@ const ShogunConfigSchema = z.object({
   spec: z.object({
     path: z.string().min(1),
   }).optional(),
+  coverage: CoverageConfigSchema.optional(),
 });
 
 export function loadConfig(cwd: string = process.cwd()): ShogunConfig {
@@ -59,12 +85,99 @@ export function loadConfig(cwd: string = process.cwd()): ShogunConfig {
     // Return sensible defaults when no config file is present
     return { version: 1 };
   }
-  const raw = yaml.load(readFileSync(configPath, 'utf8'));
+  const raw = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+
+  // Warn on unknown keys inside coverage: (forward-compatibility)
+  if (raw && typeof raw === 'object' && raw.coverage && typeof raw.coverage === 'object') {
+    const knownCoverageKeys = new Set([
+      'defaultSuite',
+      'riskWeights',
+      'expectedTagsByMethod',
+      'minCoverage',
+      'suppressDrift',
+    ]);
+    const knownRiskKeys = new Set([
+      'responseCodeGap',
+      'parameterGap',
+      'bodyFieldGap',
+      'assertionQuality',
+      'runResults',
+    ]);
+    const cov = raw.coverage as Record<string, unknown>;
+    for (const key of Object.keys(cov)) {
+      if (!knownCoverageKeys.has(key)) {
+        console.warn(`[shogun] Unknown coverage key "${key}" in shogun.config.yaml — ignored.`);
+      }
+    }
+    if (cov.riskWeights && typeof cov.riskWeights === 'object') {
+      for (const key of Object.keys(cov.riskWeights as Record<string, unknown>)) {
+        if (!knownRiskKeys.has(key)) {
+          console.warn(`[shogun] Unknown coverage.riskWeights key "${key}" — ignored.`);
+        }
+      }
+    }
+  }
+
   const result = ShogunConfigSchema.safeParse(raw);
   if (!result.success) {
     throw new Error(`Invalid shogun.config.yaml:\n${result.error.toString()}`);
   }
   return result.data as ShogunConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Coverage config resolution
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_RISK_WEIGHTS: CoverageRiskWeights = {
+  responseCodeGap: 0.35,
+  parameterGap: 0.15,
+  bodyFieldGap: 0.15,
+  assertionQuality: 0.20,
+  runResults: 0.15,
+};
+
+export const DEFAULT_EXPECTED_TAGS_BY_METHOD: Record<string, string[]> = {
+  GET: ['readonly'],
+  POST: ['crud', 'validation'],
+  PATCH: ['crud'],
+  PUT: ['crud', 'validation'],
+  DELETE: ['crud', 'guard'],
+};
+
+/**
+ * Merges user-supplied coverage config over hardcoded defaults.
+ * Returns a fully-resolved object with no optional fields — every downstream
+ * consumer can read values directly without null-checking.
+ */
+export function resolveCoverageConfig(config: ShogunConfig): {
+  defaultSuite: string | undefined;
+  riskWeights: CoverageRiskWeights;
+  expectedTagsByMethod: Record<string, string[]>;
+  minCoverage: CoverageMinThresholds;
+  suppressDrift: string[];
+} {
+  const c: CoverageConfig = config.coverage ?? {};
+
+  // Normalize expectedTagsByMethod keys to uppercase
+  let expectedTagsByMethod: Record<string, string[]> = DEFAULT_EXPECTED_TAGS_BY_METHOD;
+  if (c.expectedTagsByMethod) {
+    expectedTagsByMethod = {};
+    for (const [method, tags] of Object.entries(c.expectedTagsByMethod)) {
+      expectedTagsByMethod[method.toUpperCase()] = tags;
+    }
+  }
+
+  return {
+    defaultSuite: c.defaultSuite,
+    riskWeights: { ...DEFAULT_RISK_WEIGHTS, ...(c.riskWeights ?? {}) },
+    expectedTagsByMethod,
+    minCoverage: c.minCoverage ?? {},
+    // Default: suppress 401 drift (JWT middleware is a cross-cutting concern
+    // that applies to every authenticated endpoint — per-endpoint noise hides
+    // real drift). Config can override; CLI --suppress-drift augments.
+    suppressDrift: c.suppressDrift ?? ['401'],
+  };
 }
 
 // ---------------------------------------------------------------------------
