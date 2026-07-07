@@ -611,3 +611,59 @@ if (ctx.vars.createdItemId) {
   }
 }
 ```
+
+---
+
+## 20. Coverage v0.5 — Prototype Feedback Fixes (2026-07-04)
+
+The test team (ab-shield) took the v0.4.0 coverage report for a spin and filed 7 issues. Here's what broke, why, and the lessons for future coverage work.
+
+### Issue 2 (P0): Body field coverage showed 0% — dynamic body parsing gap
+
+**Root cause:** The coverage tool only parsed the static YAML `request.body.inline` / `request.body.file` fields. But ~all real tests set the body dynamically in `pre:` scripts via `ctx.request.body = JSON.stringify({…})` or `ctx.request.body = {…}`. The static field was empty, so coverage was 0%.
+
+**Fix:** [`extractBodyFieldsFromScript()`](src/commands/coverage/test-collector.ts:193) now scans pre-scripts for `ctx.request.body = <object-literal>` assignments, balances braces to extract the literal, normalises shorthand/unquoted keys, and `JSON.parse`s it for top-level field names. `JSON.stringify(…)` wrappers are stripped first. Variable references (`ctx.request.body = requestBody`) are skipped — can't resolve statically.
+
+**Result:** Body field coverage went from `0 / 230 (0%)` → `38 / 230 (16.5%)` against the local-dev-test-repo.
+
+**Lesson:** Static YAML analysis is insufficient for shogun — the pre/post scripts are where the real request shaping happens. Any coverage dimension that depends on request shape must scan pre-scripts. The same applies to query params set via `ctx.request.path = '…?key=value'` (now handled by [`extractParamsFromScript()`](src/commands/coverage/test-collector.ts:282)).
+
+### Issue 1 (P1): `--last-run` returned "No runs found"
+
+**Root cause (two bugs):**
+1. The coverage run-loader's [`loadRunById()`](src/commands/coverage/run-loader.ts:34) only looked for `summary.json`, but the team's test repo names the file `run.json` (same shape). The logger's own `loadRunById` already preferred `run.json` — the coverage module was inconsistent.
+2. The CLI arg parser had a **duplicate `case '--run'`** — the second case (which sets `runId`) was dead code, so `--run <id>` never worked for coverage.
+
+**Fix:** Coverage `loadRunById` now tries `summary.json` then `run.json`. The duplicate `case '--run'` was removed (the first one set `result.run`, used by `shogun report`; the second set `result.runId`, used by coverage — both now coexist correctly).
+
+**Lesson:** When two commands share a flag name (`--run`), a single `switch` case can't serve both. Keep flag parsing in one place and map to distinct result fields.
+
+### Issue 4 (P1): `--format json` output failed JSON parsing
+
+**Root cause:** `writeOutput` used `process.stdout.write()`, which is **asynchronous when stdout is a pipe**. The CLI calls `process.exit()` immediately after the command returns, truncating any buffered data at the stream's highWaterMark (65536 bytes). Large specs produce >500KB JSON.
+
+**Fix:** [`writeOutput()`](src/commands/coverage/reporter/output.ts:14) now uses `writeSync(1, …)` for stdout — synchronous writes flush before exit.
+
+**Lesson:** Any CLI that emits large payloads to stdout and then calls `process.exit()` must write synchronously. `process.stdout.write` is only synchronous when stdout is a TTY; when piped, it's async and gets cut off. This is invisible in interactive testing (TTY = sync) and only bites in CI/pipe contexts.
+
+### Issue 3 (P2): 401 spec drift was noise, not signal
+
+**Root cause:** JWT auth middleware returns 401 for every authenticated endpoint, but the OpenAPI spec doesn't document 401 per-endpoint (it's cross-cutting). This produced ~40 identical drift warnings that buried real drift (like 405).
+
+**Fix:** New `coverage.suppressDrift` config (default `['401']`) + `--suppress-drift <code,code>` CLI flag (augments config). Suppressed codes are hidden from per-endpoint output and summarised once as a global note: `Suppressed drift: 3 occurrences of [401, 404] across 3 endpoints hidden`. Test-vs-reality mismatches are never suppressed (always actionable).
+
+**Lesson:** Cross-cutting concerns (auth, rate-limiting, CORS) produce uniform per-endpoint noise. Give users a way to acknowledge them globally without losing per-endpoint signal for real drift.
+
+### Issue 5 (P2): Quality score formula was undocumented
+
+**Fix:** The formula is now shown in the summary header (`per test: status 1 + shape 2×n + snapshot 3 + postScript asserts; ÷ 10 × 100`) and as a per-test breakdown in `--detail` mode: `· TestName: status ✓  shape 2  snapshot ✗  postScript 3  → 6`.
+
+**Formula:** `rawScore = status(1 if response.status set) + shape(2 × shapeAssertions.length) + snapshot(3 if enabled) + postScript(count of assert() calls)`. Endpoint score = `min(100, Σ rawScores / (tests × 10) × 100)`. A test is "thin" when `rawScore ≤ 1`.
+
+### Issue 6 (P3): `--gaps` output too long (304+ gaps)
+
+**Fix:** New `--top N` flag limits to the N highest-priority gaps (severity first, then endpoint risk score descending). Shows `Showing top 5 of 522 gaps (517 hidden). Use --top 522 to see all.`
+
+### Issue 7 (P3): `--gaps` ignored `--collection`
+
+**Fix:** When `--collection` is set with `--gaps`, gaps are now scoped to endpoints that have at least one test from that collection. Uncovered endpoints with no tests from the collection are excluded (not actionable in a collection-focused review). Result: `--gaps --collection code` → 170 gaps (down from 522).
