@@ -5,7 +5,7 @@
  *
  * The actual curl logic now lives in:
  *   src/backends/unix-backend.ts  (Unix/curl backend)
- *   src/backends/powershell-backend.ts  (PowerShell backend — future)
+ *   src/backends/powershell-backend.ts  (PowerShell backend)
  *
  * The backend is set once at startup via initExecutor().
  * Called from index.ts after CLI flag parsing.

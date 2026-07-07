@@ -39,6 +39,12 @@ export interface SnapshotResult {
 export interface ExecutorOptions {
   timeout?: number;
   followRedirects?: boolean;
+  /**
+   * When true (default), inject AUTH_TOKEN from env as `Authorization: Bearer <token>`
+   * on requests that do not already have an Authorization header.
+   * Pass false to disable — auth must be wired explicitly in pre-scripts.
+   */
+  autoInjectAuth?: boolean;
 }
 
 export interface BackendExecutor {

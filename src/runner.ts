@@ -214,10 +214,11 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
 
   printSummary(summary);
 
-  // Auto-update the _failures_ collection whenever any test failed
-  if (summary.failed > 0 || summary.dependencyFailed > 0) {
-    updateFailuresCollection(summary.results, config, cwd);
-  }
+  // Auto-update the _failures_ collection on every run.
+  // A run with failures rewrites the order list with the failing tests.
+  // A clean run clears the list so stale failures don't linger and mislead
+  // agents/humans into re-investigating tests that now pass.
+  updateFailuresCollection(summary.results, config, cwd);
 
   return summary;
 }
@@ -502,6 +503,7 @@ async function runSingleTest(
   try {
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? '10', 10),
+      autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
     });
   } catch (err) {
     return makeFailedResult(test.name, file, startMs, {}, `curl failed: ${err}`, scriptOutput);
@@ -596,8 +598,10 @@ async function runSingleFile(
  * (or the equivalent path under `cwd`) so that its `order` list contains only
  * the cross-collection references for tests that failed in this run.
  *
- * The file is only written when there are failures; a clean run leaves it
- * unchanged so the previous failure list is preserved for reference.
+ * Called on every run. A run with failures rewrites the order list with the
+ * failing tests; a clean run writes an empty order list so stale failures
+ * don't linger and mislead agents/humans into re-investigating tests that
+ * now pass.
  */
 function updateFailuresCollection(
   results: import('./types.js').TestResult[],
@@ -619,23 +623,25 @@ function updateFailuresCollection(
     // Deduplicate (shouldn't happen, but be safe)
     .filter((ref, i, arr) => arr.indexOf(ref) === i);
 
-  if (failedRefs.length === 0) return;
-
-  const orderLines = failedRefs.map(ref => `  - ${ref}`).join('\n');
+  const isClean = failedRefs.length === 0;
+  const orderLines = isClean ? '  # (empty — last run was clean)' : failedRefs.map(ref => `  - ${ref}`).join('\n');
   const timestamp = new Date().toISOString();
 
   const yaml = `# _failures_/_collection.yaml
 #
 # Auto-managed by the shogun runner.
 #
-# After any run that contains failures, shogun rewrites the \`order\` list below
-# with the collection/test references of every test that failed.  Re-running
+# After any run, shogun rewrites the \`order\` list below with the
+# collection/test references of every test that failed in that run.  Re-running
 # this collection with:
 #
 #   shogun run --collection _failures_
 #
 # lets you quickly re-execute only the tests that broke in the previous run
 # without having to remember which ones they were.
+#
+# A clean run (zero failures) clears the list so stale failures don't linger
+# and mislead agents/humans into re-investigating tests that now pass.
 #
 # Tests with \`dependsOn\` declared will have their dependencies automatically
 # satisfied when re-run — even from this failures collection.
@@ -645,9 +651,9 @@ function updateFailuresCollection(
 # mechanism.  Do not add shared auth or workspace-load logic here; it belongs
 # in the originating collection.
 #
-# ⚠️  Do not hand-edit the \`order\` list — it is overwritten on every run that
-#     produces failures.  To permanently pin a subset of tests, copy the list
-#     into a new named collection or suite instead.
+# ⚠️  Do not hand-edit the \`order\` list — it is overwritten on every run.
+#     To permanently pin a subset of tests, copy the list into a new named
+#     collection or suite instead.
 #
 # Last updated: ${timestamp}
 
@@ -676,7 +682,11 @@ teardown: |
 
   const outPath = join(failuresDir, '_collection.yaml');
   writeFileSync(outPath, yaml, 'utf8');
-  console.log(`\n  ✎  _failures_ collection updated (${failedRefs.length} test${failedRefs.length === 1 ? '' : 's'}): ${outPath}`);
+  if (isClean) {
+    console.log(`\n  ✓  _failures_ collection cleared (clean run): ${outPath}`);
+  } else {
+    console.log(`\n  ✎  _failures_ collection updated (${failedRefs.length} test${failedRefs.length === 1 ? '' : 's'}): ${outPath}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

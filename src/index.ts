@@ -12,6 +12,7 @@ import { coverage } from './commands/coverage.js';
 import { checkBackend } from './commands/check-backend.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
 import { initExecutor, checkDependencies } from './executor.js';
+import { init } from './commands/init.js';
 // VERSION is a generated constant so it is always correct whether shogun is
 // run via tsx, via the compiled dist/, or as a standalone bun binary.
 // See scripts/gen-version.mjs — it is regenerated before every pkg:* build.
@@ -26,6 +27,10 @@ const USAGE = `
 shogun — shell-first API testing system
 
 Usage:
+  shogun init                         Scaffold a new test repo in the current directory
+  shogun init <dir>                   Scaffold into a new subdirectory
+  shogun init --force                 Overwrite existing files
+
   shogun run                          Run all tests (default env)
   shogun run --env QA                 Select environment
   shogun run --collection agents      Run one collection
@@ -92,6 +97,9 @@ interface ParsedArgs {
   list?: boolean;
   // coverage-specific
   uncovered?: boolean;
+  // init-specific
+  initDir?: string;
+  force?: boolean;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -126,6 +134,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--search':     result.search = argv[++i]; break;
       case '--list':       result.list = true; break;
       case '--uncovered':  result.uncovered = true; break;
+      case '--force':      result.force = true; break;
       default:
         if (arg.startsWith('--')) {
           // Unknown flag — skip the value token if it doesn't look like a flag
@@ -134,8 +143,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
           if (nextIsValue) i++;
           console.warn(`Warning: unrecognised flag "${arg}" ignored.  Run shogun --help for usage.`);
         } else {
-          // Bare positional — used as spec source override
+          // Bare positional — used as spec source override OR init target dir
           result.specSource = arg;
+          result.initDir = arg;
         }
         break;
     }
@@ -178,6 +188,11 @@ async function main() {
   }
 
   switch (subcommand) {
+    case 'init': {
+      const exitCode = await init({ dir: args.initDir, force: args.force });
+      process.exit(exitCode);
+      break;
+    }
     case 'run': {
       const exitCode = await run({ ...args, format: args.format as 'pretty' | 'json' | 'tap' | undefined });
       process.exit(exitCode);
