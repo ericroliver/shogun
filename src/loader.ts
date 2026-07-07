@@ -45,6 +45,7 @@ const CoverageConfigSchema = z.object({
   riskWeights: CoverageRiskWeightsSchema,
   expectedTagsByMethod: z.record(z.array(z.string())).optional(),
   minCoverage: CoverageMinThresholdsSchema,
+  suppressDrift: z.array(z.string()).optional(),
 }).passthrough();
 
 const ShogunConfigSchema = z.object({

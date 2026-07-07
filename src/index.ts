@@ -148,7 +148,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       case '--gaps':       result.gaps = true; break;
       case '--detail':     result.detail = true; break;
       case '--last-run':   result.lastRun = true; break;
-      case '--run':        result.runId = argv[++i]; break;
+      case '--run': {
+        const val = argv[++i];
+        result.run = val;   // used by `shogun report`
+        result.runId = val; // used by `shogun coverage`
+        break;
+      }
       case '--top':        result.top = parseInt(argv[++i]!, 10); break;
       case '--suppress-drift': {
         const val = argv[++i];
