@@ -9,6 +9,9 @@ import { writeFileSync, unlinkSync, existsSync, readdirSync, readFileSync } from
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+const require = createRequire(import.meta.url);
 import type {
   ShogunContext,
   ShogunRequest,
@@ -162,7 +165,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   }
   const safeHeaders = { ...headers };
   if (safeHeaders['Authorization']) {
-    safeHeaders['Authorization'] = safeHeaders['Authorization'].replace(/(Bearer\\s+)(.{4}).*/, '$1$2…');
+    safeHeaders['Authorization'] = safeHeaders['Authorization'].replace(/(Bearer\\s+)(.{4}).*/, '$1$2...');
   }
   ctx.log(\`  request headers: \${JSON.stringify(safeHeaders)}\`);
 
@@ -176,9 +179,9 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   try { parsed = JSON.parse(text); } catch { /* keep string */ }
 
   // Log status; for non-2xx also dump the response body so failures are self-diagnosable
-  ctx.log(\`  → \${res.status}\`);
+  ctx.log(\`  <- \${res.status}\`);
   if (res.status < 200 || res.status >= 300) {
-    const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text;
+    const snippet = text.length > 500 ? text.slice(0, 500) + '...' : text;
     ctx.log(\`  response body: \${snippet}\`);
   }
 
@@ -207,9 +210,15 @@ async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
   const logs: string[] = [];
 
   return new Promise((resolve) => {
-    // Use tsx to execute the TypeScript script
-    const isWin = process.platform === 'win32';
-    const proc = spawn(isWin ? 'npx.cmd' : 'npx', ['tsx', scriptFile], {
+    // Use node --import tsx to execute the script. This avoids spawn('npx',...)
+    // with shell:true (DEP0190 on Node 22+) and avoids spawn('npx.cmd',...)
+    // which fails with EINVAL on Windows without shell:true.
+    // Works cross-platform: Unix and Windows.
+    // Resolve tsx from shogun's own node_modules (not CWD) so it works
+    // even when shogun is invoked from a test directory.
+    const tsxPath = require.resolve('tsx');
+    const tsxUrl = pathToFileURL(tsxPath).href;
+    const proc = spawn(process.execPath, ['--import', tsxUrl, scriptFile], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
     });

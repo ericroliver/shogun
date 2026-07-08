@@ -393,23 +393,39 @@ try {
     $responseHeaders[$key] = ($response.Headers[$key] -join ', ')
   }
 } catch {
-  # PowerShell 5.1 throws on non-2xx status codes
-  if ($_.Exception.Response) {
-    $statusCode = [int]$_.Exception.Response.StatusCode
-    try {
-      $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
-      $bodyContent = $reader.ReadToEnd()
-      $reader.Close()
-    } catch {
-      $bodyContent = $_.Exception.Message
+  # PowerShell throws on non-2xx status codes (both 5.1 and 7.x)
+  $err = $_
+  if ($err.Exception.Response) {
+    try { $statusCode = [int]$err.Exception.Response.StatusCode } catch {}
+    # ErrorDetails.Message works in both PS 5.1 and PS 7 — contains response body as string
+    if ($err.ErrorDetails -and $err.ErrorDetails.Message) {
+      $bodyContent = $err.ErrorDetails.Message
+    } else {
+      # PS 5.1 fallback: GetResponseStream() on HttpWebResponse
+      try {
+        $stream = $err.Exception.Response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream, [Text.Encoding]::UTF8)
+        $bodyContent = $reader.ReadToEnd()
+        $reader.Close()
+      } catch {
+        $bodyContent = $err.Exception.Message
+      }
     }
+    # Headers: PS 7 uses HttpResponseMessage headers, PS 5.1 uses WebHeaderCollection
     try {
-      foreach ($key in $_.Exception.Response.Headers.AllKeys) {
-        $responseHeaders[$key] = ($_.Exception.Response.Headers.GetValues($key) -join ', ')
+      $respHeaders = $err.Exception.Response.Headers
+      if ($respHeaders -is [System.Net.Http.Headers.HttpResponseHeaders]) {
+        foreach ($h in $respHeaders) {
+          $responseHeaders[$h.Key] = ($h.Value -join ', ')
+        }
+      } else {
+        foreach ($key in $respHeaders.AllKeys) {
+          $responseHeaders[$key] = ($respHeaders.GetValues($key) -join ', ')
+        }
       }
     } catch {}
   } else {
-    $bodyContent = $_.Exception.Message
+    $bodyContent = $err.Exception.Message
   }
 }
 
