@@ -157,6 +157,23 @@ export function getExpectedPathFromTest(
 // ---------------------------------------------------------------------------
 
 export function assertionsAllPassed(results: AssertionResults): boolean {
+  // Fail closed: if no assertions were recorded at all, the test did not
+  // actually validate anything. This catches silent script failures where
+  // pre-script ctx.assert() calls never ran and no YAML-level assertions
+  // (status, shape, snapshot) were declared.
+  const hasAnyAssertion =
+    results.status !== undefined ||
+    (results.shape !== undefined && results.shape.length > 0) ||
+    results.snapshot !== undefined ||
+    results.postScript !== undefined;
+
+  if (!hasAnyAssertion) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[asserter] assertionsAllPassed: no assertions recorded — failing closed\n`);
+    }
+    return false;
+  }
+
   if (results.status === false) return false;
   if (results.shape?.some(s => !s.passed)) return false;
   if (results.snapshot === false) return false;

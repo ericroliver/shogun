@@ -303,12 +303,18 @@ async function ensureCollectionSetup(
   // 2. Run collection's own setup script
   if (definition.setup) {
     try {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] running collection setup for "${collectionName}"\n`);
+      }
       const result = await runScript(definition.setup, {
         env: opts.env,
         vars: opts.vars,
         request: dummyRequest,
         scriptsDir: opts.scriptsDir,
       });
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] collection setup result: passed=${result.passed}, error=${result.error ?? 'none'}, varMutations=${JSON.stringify(result.varMutations ?? {}).slice(0, 300)}\n`);
+      }
       applyVarMutations(opts.vars, result.varMutations);
       if (!result.passed) {
         console.error(`Collection setup failed: ${result.error}`);
@@ -475,6 +481,9 @@ async function runSingleTest(
   if (test.pre) {
     const preStart = Date.now();
     try {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] pre-script for "${test.name}" (${preMs}ms in)\n`);
+      }
       const preResult = await runScript(test.pre, {
         env: opts.env,
         vars: opts.vars,
@@ -482,6 +491,9 @@ async function runSingleTest(
         scriptsDir: opts.scriptsDir,
       });
       preMs = Date.now() - preStart;
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] pre-script done: passed=${preResult.passed}, preMs=${preMs}, error=${preResult.error ?? 'none'}, reqMutations=${JSON.stringify(preResult.requestMutations ?? {}).slice(0, 200)}, varMutations=${JSON.stringify(preResult.varMutations ?? {}).slice(0, 200)}\n`);
+      }
       scriptOutput.push(...preResult.logs);
       if (!preResult.passed) {
         return makeFailedResult(test.name, file, startMs, {}, `Pre-script failed: ${preResult.error}`, scriptOutput);
@@ -501,10 +513,16 @@ async function runSingleTest(
   // Execute HTTP request
   let response: ShogunResponse;
   try {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[runner] executeRequest: ${request.method} ${request.url}\n`);
+    }
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
     });
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
+    }
   } catch (err) {
     return makeFailedResult(test.name, file, startMs, {}, `curl failed: ${err}`, scriptOutput);
   }
@@ -557,6 +575,10 @@ async function runSingleTest(
   const durationMs = Date.now() - startMs;
   const curlMs = response.curlMs;
   const allPassed = assertionsAllPassed(assertions);
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[runner] assertions: ${JSON.stringify(assertions)}\n`);
+    process.stderr.write(`[runner] allPassed=${allPassed}, needsBaseline=${needsBaseline}, finalStatus=${needsBaseline ? 'needs_baseline' : allPassed ? 'passed' : 'failed'}\n`);
+  }
   const finalStatus = needsBaseline ? 'needs_baseline' : allPassed ? 'passed' : 'failed';
 
   const timings: TestTimings = {

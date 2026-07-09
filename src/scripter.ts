@@ -55,8 +55,17 @@ export async function runScript(
   const wrapper = buildScriptWrapper(scriptSource, ctx, sharedScripts);
   writeFileSync(scriptFile, wrapper, 'utf8');
 
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] scriptFile: ${scriptFile}\n`);
+    process.stderr.write(`[scripter] wrapper length: ${wrapper.length} chars\n`);
+    process.stderr.write(`[scripter] source snippet: ${scriptSource.slice(0, 120)}...\n`);
+  }
+
   try {
     const result = await executeScript(scriptFile);
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] executeScript returned: passed=${result.passed}, error=${result.error ?? 'none'}, logs=${result.logs.length}, reqMutations=${JSON.stringify(result.requestMutations ?? {}).slice(0, 200)}, varMutations=${JSON.stringify(result.varMutations ?? {}).slice(0, 200)}\n`);
+    }
     return result;
   } finally {
     cleanup(scriptFile);
@@ -228,9 +237,35 @@ export const __result = {
 async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
   const scriptUrl = pathToFileURL(scriptFile).href;
   
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] executeScript: importing ${scriptUrl}\n`);
+  }
+
   try {
     const mod = await import(scriptUrl);
-    const result = (mod as { __result: any }).__result;
+    
+    if (process.env.SHOGUN_DEBUG) {
+      const exportKeys = mod ? Object.keys(mod) : [];
+      process.stderr.write(`[scripter] import resolved, exports: ${JSON.stringify(exportKeys)}\n`);
+      process.stderr.write(`[scripter] __result present: ${'__result' in (mod ?? {})}\n`);
+    }
+    
+    const result = (mod as { __result?: any }).__result;
+    
+    if (!result) {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[scripter] __result is undefined — module loaded but export missing\n`);
+      }
+      return {
+        passed: false,
+        error: `Script module loaded but __result export was missing (possible stale module cache or import failure)`,
+        logs: [],
+      };
+    }
+    
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] __result: passed=${result.passed}, error=${result.error ?? 'none'}, logs=${result.logs?.length ?? 0}\n`);
+    }
     
     return {
       passed: result.passed,
@@ -240,6 +275,10 @@ async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
       varMutations: result.vars,
     };
   } catch (err: any) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] import() threw: ${err?.message || String(err)}\n`);
+      process.stderr.write(`[scripter] error stack: ${err?.stack ?? 'no stack'}\n`);
+    }
     return {
       passed: false,
       error: `Script execution failed: ${err?.message || String(err)}`,
