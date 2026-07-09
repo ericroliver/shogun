@@ -1,17 +1,15 @@
 /**
  * src/scripter.ts
  * Executes inline TypeScript pre/post scripts from test definitions.
- * Scripts receive a ShogunContext and run via tsx eval.
+ * Scripts receive a ShogunContext and run via in-process import().
+ * Works in both dev mode (Node + tsx) and compiled binary (Bun).
  */
 
-import { spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-const require = createRequire(import.meta.url);
 import type {
   ShogunContext,
   ShogunRequest,
@@ -34,8 +32,9 @@ export interface ScriptRunResult {
 export type SharedVars = Record<string, unknown>;
 
 /**
- * Runs a pre or post script in a sandboxed context.
- * Uses a JSON message-passing channel over stdout to return mutations and logs.
+ * Runs a pre or post script in-process.
+ * Uses dynamic import() which works natively in Bun (compiled binary)
+ * and in Node with tsx registered as loader (dev mode).
  */
 export async function runScript(
   scriptSource: string,
@@ -99,7 +98,6 @@ ${sharedImports}
 const __ctxData = ${ctxData};
 
 const __logs: string[] = [];
-const __mutations: Record<string, unknown> = {};
 
 const ctx = {
   env: __ctxData.env as Record<string, string>,
@@ -190,91 +188,64 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
 
 // ---- user script ----
 
-async function __runUserScript() {
-  ${source}
+let __errorMessage: string | null = null;
+
+try {
+  await (async () => {
+    ${source}
+  })();
+} catch (e: any) {
+  if (e?.name === 'ShogunAssertionError') {
+    __errorMessage = e.message;
+  } else {
+    __errorMessage = e?.message || String(e);
+  }
 }
 
-await __runUserScript();
-
-// ---- output mutations and logs via stdout JSON ----
-const __output = {
+// ---- export result for in-process import() ----
+export const __result = {
+  passed: __errorMessage === null,
+  error: __errorMessage ?? undefined,
   request: ctx.request,
   vars: ctx.vars,
   logs: __logs,
 };
-process.stdout.write(JSON.stringify(__output) + '\\n');
 `;
 }
 
+/**
+ * Executes the wrapper script via in-process dynamic import().
+ * 
+ * - Bun (compiled binary): handles TypeScript natively, no loader needed.
+ * - Node + tsx (dev mode): tsx is registered as the ESM loader, so import()
+ *   of .mts files works transparently.
+ * 
+ * This replaces the previous spawn-based approach which had multiple issues:
+ * - DEP0190: spawn with shell:true deprecated in Node 22+
+ * - EINVAL: spawn without shell:true fails for .cmd files on Windows
+ * - require.resolve('tsx'): fails in compiled binary (no node_modules at runtime)
+ */
 async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
-  const logs: string[] = [];
-
-  return new Promise((resolve) => {
-    // Use node --import tsx to execute the script. This avoids spawn('npx',...)
-    // with shell:true (DEP0190 on Node 22+) and avoids spawn('npx.cmd',...)
-    // which fails with EINVAL on Windows without shell:true.
-    // Works cross-platform: Unix and Windows.
-    // Resolve tsx from shogun's own node_modules (not CWD) so it works
-    // even when shogun is invoked from a test directory.
-    const tsxPath = require.resolve('tsx');
-    const tsxUrl = pathToFileURL(tsxPath).href;
-    const proc = spawn(process.execPath, ['--import', tsxUrl, scriptFile], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => {
-      const text = d.toString();
-      stderr += text;
-      // Collect [script] log lines
-      for (const line of text.split('\n')) {
-        if (line.startsWith('[script] ')) {
-          logs.push(line.slice(9));
-        }
-      }
-    });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        // Check if it's an assertion error
-        const assertMatch = stderr.match(/ShogunAssertionError: (.+)/);
-        const errorMsg = assertMatch
-          ? assertMatch[1]
-          : stderr.trim() || `Script exited with code ${code}`;
-
-        resolve({ passed: false, error: errorMsg, logs });
-        return;
-      }
-
-      // Parse JSON output from last line of stdout
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      const lastLine = lines[lines.length - 1];
-
-      try {
-        const output = JSON.parse(lastLine) as {
-          request?: Partial<ShogunRequest>;
-          vars?: Record<string, unknown>;
-          logs?: string[];
-        };
-        resolve({
-          passed: true,
-          logs: output.logs ?? [],
-          requestMutations: output.request,
-          varMutations: output.vars,
-        });
-      } catch {
-        resolve({ passed: true, logs });
-      }
-    });
-
-    proc.on('error', (err) => {
-      resolve({ passed: false, error: `Failed to spawn tsx: ${err.message}`, logs });
-    });
-  });
+  const scriptUrl = pathToFileURL(scriptFile).href;
+  
+  try {
+    const mod = await import(scriptUrl);
+    const result = (mod as { __result: any }).__result;
+    
+    return {
+      passed: result.passed,
+      error: result.error,
+      logs: result.logs ?? [],
+      requestMutations: result.request,
+      varMutations: result.vars,
+    };
+  } catch (err: any) {
+    return {
+      passed: false,
+      error: `Script execution failed: ${err?.message || String(err)}`,
+      logs: [],
+    };
+  }
 }
 
 function loadSharedScriptImports(scriptsDir: string): Record<string, string> {
