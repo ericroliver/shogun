@@ -46,9 +46,14 @@ export function renderMarkdown(
     const status = ep.tests.length > 0 ? '✅' : '❌';
     const testCount = ep.tests.length > 0 ? String(ep.tests.length) : '0';
     const rcc = rccMap.get(`${ep.method} ${ep.path}`);
-    const responseCodes = rcc
-      ? `${rcc.coveredCount}/${rcc.totalSpecCodes}`
-      : '0/0';
+    let responseCodes: string;
+    if (rcc) {
+      const untested = rcc.allCodes.filter(c => c.status === 'untested').map(c => c.code);
+      const untestedLabel = untested.length > 0 ? ` (missing: ${untested.join(', ')})` : '';
+      responseCodes = `${rcc.coveredCount}/${rcc.totalSpecCodes}${untestedLabel}`;
+    } else {
+      responseCodes = '0/0';
+    }
     const tag = ep.tag ?? '(untagged)';
     const collectionNames = ep.tests.length > 0
       ? [...new Set(ep.tests.map(t => t.collection))].join(', ')
