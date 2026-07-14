@@ -3,6 +3,10 @@
  * src/index.ts — shogun CLI entrypoint
  */
 
+// Bun runtime detection — declare global so TypeScript is satisfied
+// without requiring @types/bun as a dev dependency.
+declare const Bun: unknown;
+
 import { run } from './commands/run.js';
 import { snapshot } from './commands/snapshot.js';
 import { report } from './commands/report.js';
@@ -209,8 +213,25 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return result;
 }
 
+function getCliArgs(): string[] {
+  const argv = process.argv;
+
+  // Bun standalone executable:
+  // ["C:\\bin\\shogun.exe", "--help"]
+  if (
+    typeof Bun !== 'undefined' &&
+    argv[0]?.toLowerCase() === process.execPath.toLowerCase()
+  ) {
+    return argv.slice(1);
+  }
+
+  // Node / tsx:
+  // ["node.exe", "src/index.ts", "--help"]
+  return argv.slice(2);
+}
+
 async function main() {
-  const [, , subcommand, ...rest] = process.argv;
+  const [subcommand, ...rest] = getCliArgs();
 
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
     process.stdout.write(USAGE);
@@ -323,10 +344,26 @@ async function main() {
   }
 }
 
+/*
 // Only run main() when executed directly (not when imported for testing)
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err: unknown) => {
   console.error('Fatal error:', err);
   process.exit(1);
+  });
+}
+*/
+
+// Run when invoked directly through Node/tsx or as a Bun standalone executable.
+const isDirectExecution =
+  typeof Bun !== 'undefined'
+    ? true
+    : process.argv[1] !== undefined &&
+      fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isDirectExecution) {
+  main().catch((err: unknown) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
   });
 }
