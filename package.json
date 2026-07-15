@@ -34,7 +34,7 @@
     "pkg:macos": "node scripts/gen-version.mjs && bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile bin/shogun-macos-arm64 && cp bin/shogun-macos-arm64 bin/shogun",
     "pkg:linux": "node scripts/gen-version.mjs && bun build --compile --target=bun-linux-x64 src/index.ts --outfile bin/shogun-linux-x64",
     "pkg:linux-arm64": "node scripts/gen-version.mjs && bun build --compile --target=bun-linux-arm64 src/index.ts --outfile bin/shogun-linux-arm64",
-    "pkg:win": "node scripts/gen-version.mjs && bun build --compile --target=bun-windows-x64 src/index.ts --outfile bin/shogun-win-x64",
+    "pkg:win": "node scripts/gen-version.mjs && bun build --compile --target=bun-windows-x64-baseline src/index.ts --outfile bin/shogun-win-x64",
     "pkg:all": "npm run pkg:macos && npm run pkg:linux && npm run pkg:linux-arm64 && npm run pkg:win"
   },
   "dependencies": {
