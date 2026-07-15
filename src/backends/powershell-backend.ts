@@ -733,23 +733,71 @@ ${escapeHereString(actual)}
   // Private helpers
   // =======================================================================
 
+  /**
+   * Spawn PowerShell, trying pwsh.exe (PowerShell 7) first, then falling back
+   * to powershell.exe (Windows PowerShell 5.1).
+   *
+   * CRITICAL: The fallback must handle the async ENOENT error from spawn().
+   * The previous try/catch pattern was broken — spawn() never throws
+   * synchronously, so the catch block was dead code. The ENOENT error arrives
+   * asynchronously via the 'error' event.
+   */
   private async spawnPowerShell(script: string): Promise<string> {
+    // On Windows, try pwsh.exe (PS7) then powershell.exe (PS5.1).
+    // On Unix, try pwsh then powershell (no .exe).
+    const cmds = process.platform === 'win32'
+      ? ['pwsh.exe', 'powershell.exe']
+      : ['pwsh', 'powershell'];
+
+    let lastError: Error | undefined;
+
+    for (const cmd of cmds) {
+      try {
+        return await this.trySpawnPS(cmd, script);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        // ENOENT means the command wasn't found — try next command
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT') continue;
+        // Other errors (non-zero exit, etc.) should propagate immediately
+        throw err;
+      }
+    }
+
+    throw new Error(
+      `PowerShell not found. Tried: ${cmds.join(', ')}. ` +
+      `Last error: ${lastError?.message ?? 'unknown'}`
+    );
+  }
+
+  /**
+   * Spawn a single PowerShell command, writing the script to stdin.
+   * Returns the stdout output on success (exit code 0).
+   * Rejects on spawn error (e.g., ENOENT) or non-zero exit code.
+   */
+  private trySpawnPS(cmd: string, script: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const trySpawn = (cmd: string) => {
-        const proc = spawn(cmd, ['-NoProfile', '-NonInteractive', '-Command', '-']);
-        let stdout = '';
-        let stderr = '';
-        proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-        proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-        proc.stdin.write(script);
-        proc.stdin.end();
-        proc.on('close', (code: number) => {
-          if (code === 0) resolve(stdout);
-          else reject(new Error(stderr || `PowerShell exited ${code}`));
-        });
-        proc.on('error', reject);
-      };
-      try { trySpawn('pwsh.exe'); } catch { trySpawn('powershell.exe'); }
+      const proc = spawn(cmd, ['-NoProfile', '-NonInteractive', '-Command', '-']);
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+
+      proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+      // Write script to stdin (safe even before process is fully started —
+      // Node buffers stdin internally)
+      proc.stdin.write(script);
+      proc.stdin.end();
+
+      proc.on('error', (err) => {
+        if (!settled) { settled = true; reject(err); }
+      });
+      proc.on('close', (code: number) => {
+        if (settled) return; // already rejected via 'error' event
+        if (code === 0) { settled = true; resolve(stdout); }
+        else { settled = true; reject(new Error(stderr || `PowerShell exited ${code}`)); }
+      });
     });
   }
 

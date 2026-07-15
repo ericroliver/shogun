@@ -234,7 +234,14 @@ async function main() {
   const [subcommand, ...rest] = getCliArgs();
 
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
+    // Parse any --backend flag that was provided alongside --help
+    const helpArgs = parseArgs(rest);
+    const backend = createBackend(helpArgs.backend);
+    const source = getBackendSource(helpArgs.backend);
+
     process.stdout.write(USAGE);
+    process.stdout.write(`\nBackend: ${backend.name} (selected via ${source})\n`);
+    process.stdout.write(`Run 'shogun check-backend' to verify dependencies.\n`);
     process.exit(0);
   }
 
