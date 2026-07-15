@@ -11,7 +11,7 @@ import {
   discoverCollections,
 } from '../../loader.js';
 import type { ShogunConfig } from '../../types.js';
-import type { TestEntry } from './types.js';
+import type { TestEntry, CoverAnnotation } from './types.js';
 
 export async function collectTestEntries(
   config: ShogunConfig,
@@ -99,17 +99,23 @@ export async function collectTestEntries(
       // --- Request params (params object + query string) ---
       // Also scan pre-scripts for query params set via
       // `ctx.request.path = '…?key=value'` to catch dynamic param coverage.
+      // staticPath uses the path WITHOUT query string so the matcher can
+      // correctly align tests to spec endpoints.
+      const strippedPath = stripQueryString(rawPath);
       const staticParams = extractRequestParams(req, rawPath);
       const preScriptParams = hasPreScript
         ? extractParamsFromScript(preScript as string)
         : [];
       const requestParams = [...new Set([...staticParams, ...preScriptParams])];
 
+      // --- Covers annotation (explicit endpoint+responseCode declarations) ---
+      const covers = extractCovers(p);
+
       entries.push({
         name,
         file: relPath,
         collection: collectionName,
-        staticPath: rawPath,
+        staticPath: strippedPath,
         method: rawMethod.toUpperCase(),
         tags,
         expectedStatus,
@@ -122,6 +128,7 @@ export async function collectTestEntries(
         requestParams,
         preScriptBody: hasPreScript ? (preScript as string) : undefined,
         postScriptBody: hasPostScript ? (postScript as string) : undefined,
+        covers,
       });
     }
   }
@@ -164,6 +171,15 @@ function extractRequestBodyFields(
   }
 
   return [];
+}
+
+/**
+ * Strip the query string from a path, returning only the path portion.
+ * e.g. "/api/v1/tasks?status=idle&limit=2" → "/api/v1/tasks"
+ */
+export function stripQueryString(path: string): string {
+  const qIdx = path.indexOf('?');
+  return qIdx >= 0 ? path.slice(0, qIdx) : path;
 }
 
 /**
@@ -360,4 +376,66 @@ export function extractParamsFromScript(script: string): string[] {
     }
   }
   return [...keys];
+}
+
+/**
+ * Extract explicit `covers` annotations from test YAML.
+ *
+ * Supports two formats:
+ *   covers:
+ *     - endpoint: POST /api/auth/login
+ *       responseCode: 405
+ *     - endpoint: PUT /api/admin/config/max-users
+ *
+ *   covers:
+ *     - "POST /api/auth/login:405"
+ *     - "PUT /api/admin/config/max-users"
+ */
+export function extractCovers(parsed: Record<string, unknown>): CoverAnnotation[] | undefined {
+  const raw = parsed['covers'];
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+
+  const annotations: CoverAnnotation[] = [];
+
+  for (const item of raw) {
+    // Object form: { endpoint: "POST /api/auth/login", responseCode: 405 }
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const obj = item as Record<string, unknown>;
+      const endpoint = obj['endpoint'];
+      const responseCode = obj['responseCode'];
+      if (typeof endpoint === 'string') {
+        annotations.push({
+          endpoint,
+          responseCode: typeof responseCode === 'number' ? responseCode : undefined,
+        });
+      }
+    }
+    // String form: "POST /api/auth/login:405" or "POST /api/auth/login"
+    else if (typeof item === 'string') {
+      const parsed = parseCoverString(item);
+      if (parsed) annotations.push(parsed);
+    }
+  }
+
+  return annotations.length > 0 ? annotations : undefined;
+}
+
+/**
+ * Parse a cover annotation string like "POST /api/auth/login:405".
+ * Returns null if the string doesn't match the expected format.
+ */
+function parseCoverString(s: string): CoverAnnotation | null {
+  // Match: "METHOD /path" optionally followed by ":code"
+  // The path may contain colons (e.g. /api/v1/users), so we match from the end.
+  const match = s.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+?)(?::(\d+))?$/i);
+  if (!match) return null;
+
+  const method = match[1]!.toUpperCase();
+  const path = match[2]!;
+  const code = match[3] ? Number(match[3]) : undefined;
+
+  return {
+    endpoint: `${method} ${path}`,
+    responseCode: code,
+  };
 }

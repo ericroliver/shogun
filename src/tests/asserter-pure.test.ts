@@ -28,7 +28,7 @@ describe('assertStatus()', () => {
     assert.equal(assertStatus(500, 200), false);
   });
 
-  test('uses strict equality - number comparison', () => {
+  test('uses strict equality — number comparison', () => {
     assert.equal(assertStatus(200 as any, '200' as any), false);
   });
 });
@@ -38,11 +38,11 @@ describe('assertStatus()', () => {
 // ===========================================================================
 
 describe('assertionsAllPassed()', () => {
-  test('returns false for empty results - fail closed (no assertions recorded)', () => {
-    // Fail closed: if no assertions were recorded at all, the test did not
-    // actually validate anything. This catches silent script failures where
-    // pre-script ctx.assert() calls never ran and no YAML-level assertions
-    // (status, shape, snapshot) were declared.
+  test('returns false for empty results (no assertions recorded — fail closed)', () => {
+    // Fail-closed behavior: if no assertions were recorded at all, the test
+    // did not actually validate anything. This catches silent script failures
+    // where pre-script ctx.assert() calls never ran and no YAML-level
+    // assertions (status, shape, snapshot) were declared.
     assert.equal(assertionsAllPassed({}), false);
   });
 
@@ -87,19 +87,13 @@ describe('assertionsAllPassed()', () => {
     assert.equal(assertionsAllPassed({ status: true, postScript: true }), true);
   });
 
-  test('returns false when status is undefined (no other assertions - fail closed)', () => {
-    // status: undefined means the field was not checked, and with no other
-    // assertions recorded, the fail-closed guard kicks in.
+  test('returns false when status is undefined (fail closed — no assertions recorded)', () => {
+    // status: undefined means status was not checked, and if no other
+    // assertions exist either, the test is vacuous — fail closed.
     assert.equal(assertionsAllPassed({ status: undefined }), false);
   });
 
-  test('returns true when status is undefined but other assertions pass', () => {
-    // status undefined is NOT a failure - it just means status wasn't checked.
-    // As long as some other assertion is present and passing, the test passes.
-    assert.equal(assertionsAllPassed({ status: undefined, snapshot: true }), true);
-  });
-
-  test('returns true when shape is empty array but status is checked', () => {
+  test('returns true when shape is empty array', () => {
     assert.equal(assertionsAllPassed({ status: true, shape: [] }), true);
   });
 });

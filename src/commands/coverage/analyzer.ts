@@ -193,6 +193,18 @@ export function computeResponseCodeCoverage(
         .map(t => String(t.expectedStatus!))
     );
 
+    // Also credit response codes declared via `covers` annotations
+    for (const test of ep.tests) {
+      if (test.covers) {
+        for (const cover of test.covers) {
+          // Only credit if this covers annotation targets THIS endpoint
+          if (cover.endpoint === `${ep.method} ${ep.path}` && cover.responseCode !== undefined) {
+            declaredCodes.add(String(cover.responseCode));
+          }
+        }
+      }
+    }
+
     // Collect actual codes from run results (Story 10)
     const actualCodes = new Set<string>();
     const mismatches: { expected: string; actual: string }[] = [];
