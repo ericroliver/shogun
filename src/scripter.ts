@@ -126,6 +126,26 @@ export function loadSharedScriptPaths(scriptsDir: string): Record<string, string
 }
 
 // ---------------------------------------------------------------------------
+// User source pre-wrapping (pure function — unit-testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-wraps user TypeScript source in an async IIFE before Bun transpilation.
+ *
+ * When Bun.Transpiler encounters top-level `await`, it treats the snippet as
+ * an ECMAScript module, in which top-level `return` is illegal. Many test
+ * authors use `return;` as an early-exit in post-scripts. Wrapping in an
+ * async IIFE makes both `return` and `await` legal and prevents ESM
+ * module detection at the snippet level.
+ *
+ * @param source - The user's inline TypeScript
+ * @returns The wrapped source, ready for Bun.Transpiler.transformSync()
+ */
+export function wrapUserSourceForTranspilation(source: string): string {
+  return `await (async () => {\n${source}\n})();`;
+}
+
+// ---------------------------------------------------------------------------
 // Wrapper builder (pure function — unit-testable)
 // ---------------------------------------------------------------------------
 
@@ -474,10 +494,25 @@ async function runScriptBun(
   }
 
   // Step 1: Transpile ONLY the user's TypeScript snippet to JavaScript.
-  // This is a small fragment, not a module, so Bun won't wrap it in ESM.
+  //
+  // CRITICAL: Pre-wrap the source in an async IIFE before transpiling.
+  // When Bun.Transpiler encounters top-level `await` in a snippet, it treats
+  // it as an ECMAScript module. In ESM, top-level `return` is illegal — only
+  // valid inside a function body. Many test authors use `return;` as an
+  // early-exit pattern in post-scripts. Without pre-wrapping, the combination
+  // of `return;` + `await` causes a transpilation error:
+  //   "Top-level return cannot be used inside an ECMAScript module"
+  //
+  // By wrapping in `await (async () => { ...user code... })()`, we:
+  //   - Make `return;` legal (inside a function body)
+  //   - Keep `await` legal (inside an async function)
+  //   - Preserve correct error propagation (re-thrown to the outer try/catch)
+  //   - Prevent ESM module detection at the snippet level
+  const wrappedSource = wrapUserSourceForTranspilation(source);
+
   let jsUserSource: string;
   try {
-    jsUserSource = transpiler.transformSync(source);
+    jsUserSource = transpiler.transformSync(wrappedSource);
   } catch (err: any) {
     return {
       passed: false,

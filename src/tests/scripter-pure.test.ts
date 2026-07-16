@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   serializeContext,
   buildScriptWrapper,
+  wrapUserSourceForTranspilation,
 } from '../scripter.js';
 import type { ScriptContext, SerializedContext } from '../scripter.js';
 import type { ShogunRequest } from '../types.js';
@@ -310,6 +311,80 @@ describe('buildScriptWrapper()', () => {
       const wrapper = buildScriptWrapper('ctx.log("x");', ctxData, {}, 'return');
       assert.ok(wrapper.includes("safeHeaders['Authorization']"));
       assert.ok(wrapper.includes("'$1$2...'"));
+    });
+  });
+
+  // ---- wrapUserSourceForTranspilation ----
+
+  describe('wrapUserSourceForTranspilation()', () => {
+    test('wraps source in an async IIFE', () => {
+      const source = 'ctx.log("hello");';
+      const wrapped = wrapUserSourceForTranspilation(source);
+      assert.ok(wrapped.includes('async () =>'));
+      assert.ok(wrapped.includes('ctx.log("hello")'));
+    });
+
+    test('uses await on the IIFE call', () => {
+      const wrapped = wrapUserSourceForTranspilation('ctx.log("x");');
+      assert.ok(wrapped.startsWith('await (async () =>'));
+      assert.ok(wrapped.endsWith('})();'));
+    });
+
+    test('preserves return statements inside the IIFE (not top-level)', () => {
+      // This is the core fix: `return;` inside the async IIFE is legal,
+      // whereas top-level `return` in ESM (triggered by top-level await) is not.
+      const source = 'if (!ctx.response) return;\nctx.log("has response");';
+      const wrapped = wrapUserSourceForTranspilation(source);
+      // The return must be inside the IIFE body, not at the top level
+      assert.ok(wrapped.includes('return;'));
+      assert.ok(!wrapped.startsWith('return'));
+      // Verify structure: starts with IIFE opening, ends with IIFE closing
+      assert.ok(wrapped.startsWith('await (async () => {\n'));
+      assert.ok(wrapped.endsWith('\n})();'));
+      // The return; must appear after the IIFE opening, not before it
+      const iifeOpenEnd = wrapped.indexOf('{\n') + 2;
+      const returnIdx = wrapped.indexOf('return;');
+      assert.ok(returnIdx > iifeOpenEnd, 'return; should be inside the IIFE body');
+    });
+
+    test('handles source with both return and await (the failing pattern)', () => {
+      // This is the exact pattern that caused the 6 failures:
+      // `return;` + `await` in a post-script
+      const source = [
+        'const data = await ctx.http.get("/api/test");',
+        'if (!data.body) return;',
+        'ctx.assert(data.status === 200, "expected 200");',
+      ].join('\n');
+      const wrapped = wrapUserSourceForTranspilation(source);
+      assert.ok(wrapped.includes('await ctx.http.get'));
+      assert.ok(wrapped.includes('return;'));
+      // Both await and return are now inside the async IIFE — legal
+      assert.ok(wrapped.startsWith('await (async () => {'));
+      assert.ok(wrapped.endsWith('})();'));
+    });
+
+    test('preserves multi-line source with complex logic', () => {
+      const source = [
+        'const x = 1;',
+        'const y = 2;',
+        'if (x > y) {',
+        '  ctx.log("x wins");',
+        '  return;',
+        '}',
+        'ctx.log("y wins");',
+      ].join('\n');
+      const wrapped = wrapUserSourceForTranspilation(source);
+      assert.ok(wrapped.includes('x wins'));
+      assert.ok(wrapped.includes('y wins'));
+      assert.ok(wrapped.includes('return;'));
+      assert.ok(wrapped.startsWith('await (async () => {\n'));
+    });
+
+    test('handles empty source gracefully', () => {
+      const wrapped = wrapUserSourceForTranspilation('');
+      assert.ok(wrapped.includes('async () =>'));
+      // Should still be valid JS: await (async () => { })(); 
+      assert.ok(wrapped.startsWith('await (async () => {'));
     });
   });
 });
