@@ -29,9 +29,6 @@ jobs:
       - name: Build all binaries
         run: bun run pkg:all
 
-      - name: Rename Windows binary
-        run: mv bin/shogun-win-x64 bin/shogun-win-x64.exe
-
       - name: Generate SHA256 checksums
         working-directory: bin
         run: |
