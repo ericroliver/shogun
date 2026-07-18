@@ -1,14 +1,18 @@
 /**
  * src/asserter.ts
- * Runs all assertions against a response:
- *   - HTTP status code
- *   - jq shape expressions (shell)
- *   - Snapshot diff (shell: jq -S | diff -u)
+ *
+ * Thin wrapper — delegates assertion logic to the active BackendExecutor.
+ *
+ *   - Status checks → handled inline (no backend needed)
+ *   - jq / PowerShell shape assertions → backend.runShapeAssertions()
+ *   - JSON normalization → backend.normalizeJson()
+ *   - Snapshot diff → backend.runDiff()
+ *
+ * The actual implementations live in:
+ *   src/backends/unix-backend.ts    (curl + jq + diff)
+ *   src/backends/powershell-backend.ts  (Invoke-RestMethod + PS cmdlets)
  */
 
-import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
 import type {
   ShogunResponse,
   TestDefinition,
@@ -16,34 +20,36 @@ import type {
   AssertionResults,
   ShapeAssertionResult,
 } from './types.js';
+
+import type { AssertContext } from './types.js';
+import type { BackendExecutor } from './backend-interface.js';
+
+import { getActiveBackend } from './backend-global.js';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { sanitizeName } from './loader.js';
 
-export interface AssertContext {
-  test: TestDefinition;
-  response: ShogunResponse;
-  config: ShogunConfig;
-  cwd: string;
-  collectionName?: string;
-  /** When true: write snapshot instead of diffing */
-  snapshotMode?: boolean;
-}
+// ---------------------------------------------------------------------------
+// Main entry point — runs all assertions for a test
+// ---------------------------------------------------------------------------
 
 export async function runAssertions(ctx: AssertContext): Promise<AssertionResults> {
   const results: AssertionResults = {};
+  const backend = getActiveBackend();
 
-  // 1. Status code
+  // 1. Status code (pure TS — no backend needed)
   if (ctx.test.response?.status !== undefined) {
     results.status = ctx.response.status === ctx.test.response.status;
   }
 
-  // 2. jq shape assertions
+  // 2. Shape assertions (jq for Unix, PowerShell for PowerShell)
   if (ctx.test.response?.shape?.length) {
-    results.shape = await runShapeAssertions(ctx.response.raw, ctx.test.response.shape);
+    results.shape = await backend.runShapeAssertions(ctx.response.raw, ctx.test.response.shape);
   }
 
-  // 3. Snapshot
+  // 3. Snapshot (normalize + diff)
   if (ctx.test.response?.snapshot) {
-    const snapResult = await runSnapshotAssertion(ctx);
+    const snapResult = await runSnapshotAssertion(ctx as any, backend);
     results.snapshot = snapResult.passed;
     results.snapshotDiff = snapResult.diff ?? null;
   }
@@ -52,7 +58,7 @@ export async function runAssertions(ctx: AssertContext): Promise<AssertionResult
 }
 
 // ---------------------------------------------------------------------------
-// Status assertion
+// Status assertion (pure TS — no backend needed)
 // ---------------------------------------------------------------------------
 
 export function assertStatus(actual: number, expected: number): boolean {
@@ -60,52 +66,7 @@ export function assertStatus(actual: number, expected: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// jq shape assertions
-// ---------------------------------------------------------------------------
-
-async function runShapeAssertions(
-  rawBody: string,
-  expressions: string[],
-): Promise<ShapeAssertionResult[]> {
-  const results: ShapeAssertionResult[] = [];
-
-  for (const expr of expressions) {
-    const result = await runJqExpression(rawBody, expr);
-    results.push(result);
-  }
-
-  return results;
-}
-
-async function runJqExpression(jsonInput: string, expr: string): Promise<ShapeAssertionResult> {
-  return new Promise((resolve) => {
-    const proc = spawn('jq', ['-e', expr], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.stdin.write(jsonInput);
-    proc.stdin.end();
-
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve({ expr, passed: true });
-      } else {
-        resolve({
-          expr,
-          passed: false,
-          error: stderr.trim() || `jq expression evaluated to false/null: ${expr}`,
-        });
-      }
-    });
-
-    proc.on('error', (err) => {
-      resolve({ expr, passed: false, error: `jq error: ${err.message}` });
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Snapshot assertions
+// Snapshot assertion (delegates to backend)
 // ---------------------------------------------------------------------------
 
 interface SnapshotResult {
@@ -114,14 +75,19 @@ interface SnapshotResult {
   needsBaseline?: boolean;
 }
 
-async function runSnapshotAssertion(ctx: AssertContext): Promise<SnapshotResult> {
+async function runSnapshotAssertion(
+  ctx: AssertContext,
+  backend: BackendExecutor,
+): Promise<SnapshotResult> {
   const expectedPath = getExpectedPath(ctx);
 
-  if (ctx.snapshotMode) {
-    await writeSnapshot(ctx.response.raw, ctx.test, ctx.config, expectedPath);
+  // Snapshot mode: capture baselines
+  if ((ctx as any).snapshotMode) {
+    await writeSnapshot(ctx.response.raw, ctx.test, ctx.config, expectedPath, backend);
     return { passed: true };
   }
 
+  // No baseline exists yet
   if (!existsSync(expectedPath)) {
     return { passed: false, needsBaseline: true };
   }
@@ -131,15 +97,15 @@ async function runSnapshotAssertion(ctx: AssertContext): Promise<SnapshotResult>
     ...(ctx.test.response?.ignore_fields ?? []),
   ];
 
-  const normalizedActual = await normalizeJson(ctx.response.raw, ignoreFields);
+  const normalizedActual = await backend.normalizeJson(ctx.response.raw, ignoreFields);
   const expectedRaw = readFileSync(expectedPath, 'utf8');
-  const normalizedExpected = await normalizeJson(expectedRaw, ignoreFields);
+  const normalizedExpected = await backend.normalizeJson(expectedRaw, ignoreFields);
 
   if (normalizedActual === normalizedExpected) {
     return { passed: true };
   }
 
-  const diff = await runDiff(normalizedExpected, normalizedActual);
+  const diff = await backend.runDiff(normalizedExpected, normalizedActual);
   return { passed: false, diff };
 }
 
@@ -148,20 +114,20 @@ export async function writeSnapshot(
   test: TestDefinition,
   config: ShogunConfig,
   expectedPath?: string,
+  backend?: BackendExecutor,
 ): Promise<void> {
+  const be = backend ?? getActiveBackend();
   const path = expectedPath ?? getExpectedPathFromTest(test, config);
   const ignoreFields = [
     ...(config.ignore_fields_global ?? []),
     ...(test.response?.ignore_fields ?? []),
   ];
-  const normalized = await normalizeJson(raw, ignoreFields);
+  const normalized = await be.normalizeJson(raw, ignoreFields);
 
-  // Refuse to write a blank baseline — this happens when the API is unreachable
-  // and the raw response body is empty. Writing blank would silently corrupt the
-  // snapshot file and cause every subsequent run to fail with a confusing diff.
+  // Refuse to write a blank baseline
   if (!normalized.trim()) {
     if (process.env.SHOGUN_DEBUG) {
-      console.warn(`[asserter] writeSnapshot suppressed for "${path}" — normalized content is empty (API may be unreachable)`);
+      console.warn(`[asserter] writeSnapshot suppressed for "${path}" — normalized content is empty`);
     }
     return;
   }
@@ -187,114 +153,27 @@ export function getExpectedPathFromTest(
 }
 
 // ---------------------------------------------------------------------------
-// JSON normalization: strip ignore_fields, sort keys via jq -S
+// Aggregate helper (pure TS — no backend needed)
 // ---------------------------------------------------------------------------
-
-async function normalizeJson(raw: string, ignoreFields: string[]): Promise<string> {
-  if (!raw.trim()) return '';
-
-  let jqExpr = '.';
-  for (const field of ignoreFields) {
-    // Convert glob-style "**.field" to jq del() expression
-    const jqPath = globToJqDel(field);
-    jqExpr = `(${jqExpr}) | ${jqPath}`;
-  }
-  jqExpr = `(${jqExpr}) | . as $x | $x`;
-
-  // Use jq -S to sort keys + apply del() expressions
-  const sortedExpr = `${jqExpr.replace(/^\((.+)\) \| \. as \$x \| \$x$/, '$1')}`;
-
-  return new Promise((resolve) => {
-    const proc = spawn('jq', ['-S', sortedExpr], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.stdin.write(raw);
-    proc.stdin.end();
-
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-      } else {
-        // Fallback: return raw if jq fails (e.g. non-JSON response)
-        if (process.env.SHOGUN_DEBUG) {
-          console.error(`[asserter] jq normalize failed: ${stderr}`);
-        }
-        resolve(raw.trim());
-      }
-    });
-
-    proc.on('error', () => resolve(raw.trim()));
-  });
-}
-
-function globToJqDel(field: string): string {
-  // "**.timestamp"  → del(.. | objects | .timestamp?)   (recursive, any depth)
-  // "**._sensors"   → del(.. | objects | ._sensors?)    (recursive, any depth)
-  // ".timestamp"    → del(.timestamp)                   (top-level only, dot-prefixed)
-  // "timestamp"     → del(.timestamp)                   (top-level only, bare name)
-  if (field.startsWith('**.')) {
-    const key = field.slice(3);
-    return `del(.. | objects | .${key}?)`;
-  }
-  // Already has a leading dot → pass through as-is
-  if (field.startsWith('.')) {
-    return `del(${field})`;
-  }
-  // Bare field name (no prefix) → treat as top-level del
-  return `del(.${field})`;
-}
-
-// ---------------------------------------------------------------------------
-// Diff
-// ---------------------------------------------------------------------------
-
-async function runDiff(expected: string, actual: string): Promise<string> {
-  return new Promise((resolve) => {
-    const proc = spawn('diff', ['-u', '--label', 'expected', '--label', 'actual', '-', '/dev/stdin'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-
-    // Write expected to stdin via first input, actual via /dev/stdin trick won't work cross-platform
-    // Use process substitution workaround: write both to tmp, diff them
-    proc.on('error', () => resolve('(diff unavailable)'));
-
-    // Simpler: use diff with two named file descriptors via shell
-    // Actually let's use a pure Node comparison and format the diff ourselves
-    proc.kill();
-
-    resolve(formatSimpleDiff(expected, actual));
-  });
-}
-
-function formatSimpleDiff(expected: string, actual: string): string {
-  const expLines = expected.split('\n');
-  const actLines = actual.split('\n');
-  const maxLen = Math.max(expLines.length, actLines.length);
-  const diffLines: string[] = ['--- expected', '+++ actual'];
-
-  let hasDiff = false;
-  for (let i = 0; i < maxLen; i++) {
-    const e = expLines[i];
-    const a = actLines[i];
-    if (e !== a) {
-      hasDiff = true;
-      if (e !== undefined) diffLines.push(`- ${e}`);
-      if (a !== undefined) diffLines.push(`+ ${a}`);
-    } else {
-      diffLines.push(`  ${e}`);
-    }
-  }
-
-  return hasDiff ? diffLines.join('\n') : '';
-}
 
 export function assertionsAllPassed(results: AssertionResults): boolean {
+  // Fail closed: if no assertions were recorded at all, the test did not
+  // actually validate anything. This catches silent script failures where
+  // pre-script ctx.assert() calls never ran and no YAML-level assertions
+  // (status, shape, snapshot) were declared.
+  const hasAnyAssertion =
+    results.status !== undefined ||
+    (results.shape !== undefined && results.shape.length > 0) ||
+    results.snapshot !== undefined ||
+    results.postScript !== undefined;
+
+  if (!hasAnyAssertion) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[asserter] assertionsAllPassed: no assertions recorded — failing closed\n`);
+    }
+    return false;
+  }
+
   if (results.status === false) return false;
   if (results.shape?.some(s => !s.passed)) return false;
   if (results.snapshot === false) return false;

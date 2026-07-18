@@ -230,7 +230,7 @@ function getFirstFailureReason(assertions: AssertionResults, error?: string): st
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatRunId(date: Date): string {
+export function formatRunId(date: Date): string {
   const pad = (n: number, len = 2) => String(n).padStart(len, '0');
   return [
     date.getFullYear(),
@@ -243,7 +243,7 @@ function formatRunId(date: Date): string {
   ].join('');
 }
 
-function safeFileName(name: string): string {
+export function safeFileName(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')

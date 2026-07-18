@@ -1,22 +1,31 @@
 /**
  * src/scripter.ts
  * Executes inline TypeScript pre/post scripts from test definitions.
- * Scripts receive a ShogunContext and run via tsx eval.
+ *
+ * Two execution paths:
+ *
+ * 1. Bun (compiled binary): In-memory transpile via Bun.Transpiler, then
+ *    execute with `new AsyncFunction()`. No temp files, no import() — this
+ *    avoids the Bun virtual-filesystem issue where compiled binaries cannot
+ *    resolve temp .mts file paths from their virtual FS (B/~BUN/root/...).
+ *
+ * 2. Node (dev mode with tsx): Temp .mts file + dynamic import(). The tsx
+ *    loader registered as ESM loader handles TypeScript transparently.
+ *
+ * Detection: `typeof Bun !== 'undefined'` is true only inside the Bun
+ * runtime (compiled binary or `bun run`). In Node with tsx, Bun is absent.
  */
 
-import { spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import type {
-  ShogunContext,
   ShogunRequest,
   ShogunResponse,
   EnvVars,
-  ShogunAssertionError as ShogunAssertionErrorType,
 } from './types.js';
-import { ShogunAssertionError } from './types.js';
 
 export interface ScriptRunResult {
   passed: boolean;
@@ -30,73 +39,171 @@ export interface ScriptRunResult {
 
 export type SharedVars = Record<string, unknown>;
 
-/**
- * Runs a pre or post script in a sandboxed context.
- * Uses a JSON message-passing channel over stdout to return mutations and logs.
- */
-export async function runScript(
-  scriptSource: string,
-  ctx: {
-    env: EnvVars;
-    vars: SharedVars;
-    request: ShogunRequest;
-    response?: ShogunResponse;
-    scriptsDir: string;
-  },
-): Promise<ScriptRunResult> {
-  const tmpId = randomBytes(6).toString('hex');
-  const scriptFile = join(tmpdir(), `shogun-script-${tmpId}.mts`);
+// ---------------------------------------------------------------------------
+// Bun runtime detection
+// ---------------------------------------------------------------------------
 
-  // Load available shared scripts
-  const sharedScripts = loadSharedScriptImports(ctx.scriptsDir);
+/** True when running inside the Bun runtime (compiled binary or `bun run`). */
+const isBunRuntime = typeof (globalThis as any).Bun !== 'undefined';
 
-  const wrapper = buildScriptWrapper(scriptSource, ctx, sharedScripts);
-  writeFileSync(scriptFile, wrapper, 'utf8');
+/** AsyncFunction constructor — used to execute transpiled JS without temp files. */
+const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor;
 
-  try {
-    const result = await executeScript(scriptFile);
-    return result;
-  } finally {
-    cleanup(scriptFile);
-  }
+interface BunTranspiler {
+  transformSync(code: string): string;
 }
 
-function buildScriptWrapper(
+/** Lazily-initialised Bun.Transpiler singleton (null when not in Bun runtime). */
+let _bunTranspiler: BunTranspiler | null | undefined;
+
+function getBunTranspiler(): BunTranspiler | null | undefined {
+  if (_bunTranspiler !== undefined) return _bunTranspiler;
+  if (!isBunRuntime) {
+    _bunTranspiler = null;
+    return null;
+  }
+  try {
+    const Bun = (globalThis as any).Bun;
+    _bunTranspiler = new Bun.Transpiler({ loader: 'ts' });
+  } catch {
+    _bunTranspiler = null;
+  }
+  return _bunTranspiler;
+}
+
+// ---------------------------------------------------------------------------
+// Context serialization
+// ---------------------------------------------------------------------------
+
+export interface ScriptContext {
+  env: EnvVars;
+  vars: SharedVars;
+  request: ShogunRequest;
+  response?: ShogunResponse;
+  scriptsDir: string;
+}
+
+/** Plain-data representation of the context, safe for JSON serialization. */
+export interface SerializedContext {
+  env: EnvVars;
+  vars: SharedVars;
+  request: ShogunRequest;
+  response: ShogunResponse | null;
+}
+
+/**
+ * Serializes the runtime context into a plain-data object suitable for
+ * JSON.stringify injection into the script wrapper.
+ */
+export function serializeContext(ctx: ScriptContext): SerializedContext {
+  return {
+    env: ctx.env,
+    vars: ctx.vars,
+    request: ctx.request,
+    response: ctx.response ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared script loading
+// ---------------------------------------------------------------------------
+
+/**
+ * Scans the scripts/ directory for `.ts` files and returns a map of
+ * script-name → absolute file path. Returns empty object if the directory
+ * does not exist.
+ */
+export function loadSharedScriptPaths(scriptsDir: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!existsSync(scriptsDir)) return result;
+
+  const files = readdirSync(scriptsDir).filter(f => f.endsWith('.ts'));
+  for (const file of files) {
+    const name = file.replace('.ts', '');
+    result[name] = join(scriptsDir, file);
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// User source pre-wrapping (pure function — unit-testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-wraps user TypeScript source in an async IIFE before Bun transpilation.
+ *
+ * When Bun.Transpiler encounters top-level `await`, it treats the snippet as
+ * an ECMAScript module, in which top-level `return` is illegal. Many test
+ * authors use `return;` as an early-exit in post-scripts. Wrapping in an
+ * async IIFE makes both `return` and `await` legal and prevents ESM
+ * module detection at the snippet level.
+ *
+ * @param source - The user's inline TypeScript
+ * @returns The wrapped source, ready for Bun.Transpiler.transformSync()
+ */
+export function wrapUserSourceForTranspilation(source: string): string {
+  return `await (async () => {\n${source}\n})();`;
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper builder (pure function — unit-testable)
+// ---------------------------------------------------------------------------
+
+export type WrapperMode = 'return' | 'export';
+
+/**
+ * Builds the TypeScript wrapper source that:
+ *  1. Injects context (env, vars, request, response) as serialised JSON
+ *  2. Provides the `ctx` API (assert, log, http, scripts)
+ *  3. Executes the user's inline script inside a try/catch
+ *  4. Returns or exports the result object
+ *
+ * @param source        - The user's inline TypeScript (pre/post/setup script)
+ * @param ctxData       - Serialized context data to inject
+ * @param sharedScripts - Map of script-name → absolute path for shared scripts
+ * @param mode          - 'return' for Bun (AsyncFunction), 'export' for Node (import)
+ */
+export function buildScriptWrapper(
   source: string,
-  ctx: {
-    env: EnvVars;
-    vars: SharedVars;
-    request: ShogunRequest;
-    response?: ShogunResponse;
-    scriptsDir: string;
-  },
+  ctxData: SerializedContext,
   sharedScripts: Record<string, string>,
+  mode: WrapperMode,
 ): string {
-  const sharedImports = Object.entries(sharedScripts)
-    .map(([name, path]) => `import * as _script_${name} from ${JSON.stringify(path)};`)
+  const ctxJson = JSON.stringify(ctxData);
+
+  // Shared script declarations differ by mode:
+  // - 'return' (Bun): dynamic import() of real file paths (Bun resolves these)
+  // - 'export' (Node): static import * as (tsx loader resolves these)
+  const sharedScriptDecls = Object.entries(sharedScripts)
+    .map(([name, path]) => {
+      if (mode === 'return') {
+        // Use file:// URL so Bun's import() resolves the real file on disk
+        const url = pathToFileURL(path).href;
+        return `const _script_${name} = await import(${JSON.stringify(url)});`;
+      }
+      return `import * as _script_${name} from ${JSON.stringify(path)};`;
+    })
     .join('\n');
 
   const scriptNames = Object.keys(sharedScripts)
     .map(name => `${name}: _script_${name}`)
     .join(', ');
 
-  // Serialize context data for injection
-  const ctxData = JSON.stringify({
-    env: ctx.env,
-    vars: ctx.vars,
-    request: ctx.request,
-    response: ctx.response ?? null,
-  });
+  // Result handling differs by mode:
+  // - 'return': return statement (works inside AsyncFunction)
+  // - 'export': export const (works as ESM module for import())
+  const tail = mode === 'return'
+    ? `return {\n    passed: __errorMessage === null,\n    error: __errorMessage ?? undefined,\n    request: ctx.request,\n    vars: ctx.vars,\n    logs: __logs,\n  };`
+    : `export const __result = {\n    passed: __errorMessage === null,\n    error: __errorMessage ?? undefined,\n    request: ctx.request,\n    vars: ctx.vars,\n    logs: __logs,\n  };`;
 
   return `
-${sharedImports}
+${sharedScriptDecls}
 
 // ---- shogun script runtime ----
 
-const __ctxData = ${ctxData};
+const __ctxData = ${ctxJson};
 
 const __logs: string[] = [];
-const __mutations: Record<string, unknown> = {};
 
 const ctx = {
   env: __ctxData.env as Record<string, string>,
@@ -115,7 +222,7 @@ const ctx = {
 
   log(message: string): void {
     __logs.push(String(message));
-    process.stderr.write('[script] ' + String(message) + '\\n');
+    if (process.env.SHOGUN_DEBUG) { process.stderr.write('[script] ' + String(message) + '\\n'); }
   },
 
   http: {
@@ -162,7 +269,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   }
   const safeHeaders = { ...headers };
   if (safeHeaders['Authorization']) {
-    safeHeaders['Authorization'] = safeHeaders['Authorization'].replace(/(Bearer\\s+)(.{4}).*/, '$1$2…');
+    safeHeaders['Authorization'] = safeHeaders['Authorization'].replace(/(Bearer\\s+)(.{4}).*/, '$1$2...');
   }
   ctx.log(\`  request headers: \${JSON.stringify(safeHeaders)}\`);
 
@@ -176,9 +283,9 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   try { parsed = JSON.parse(text); } catch { /* keep string */ }
 
   // Log status; for non-2xx also dump the response body so failures are self-diagnosable
-  ctx.log(\`  → \${res.status}\`);
+  ctx.log(\`  <- \${res.status}\`);
   if (res.status < 200 || res.status >= 300) {
-    const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text;
+    const snippet = text.length > 500 ? text.slice(0, 500) + '...' : text;
     ctx.log(\`  response body: \${snippet}\`);
   }
 
@@ -187,100 +294,426 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
 
 // ---- user script ----
 
-async function __runUserScript() {
-  ${source}
+let __errorMessage: string | null = null;
+
+try {
+  await (async () => {
+    ${source}
+  })();
+} catch (e: any) {
+  if (e?.name === 'ShogunAssertionError') {
+    __errorMessage = e.message;
+  } else {
+    __errorMessage = e?.message || String(e);
+  }
 }
 
-await __runUserScript();
+// ---- result ----
+${tail}
+`;
+}
 
-// ---- output mutations and logs via stdout JSON ----
-const __output = {
+// ---------------------------------------------------------------------------
+// Plain-JS wrapper builder (for Bun AsyncFunction execution)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a PLAIN JAVASCRIPT wrapper (no TypeScript annotations) that:
+ *  1. Injects context (env, vars, request, response) as serialised JSON
+ *  2. Provides the `ctx` API (assert, log, http, scripts)
+ *  3. Executes the already-transpiled user script inside a try/catch
+ *  4. Returns the result object
+ *
+ * This is used ONLY by the Bun execution path. Because it contains zero
+ * TypeScript syntax, Bun.Transpiler never touches it — we feed it directly
+ * to `new AsyncFunction()` where top-level `return` is perfectly legal.
+ *
+ * @param userJsSource   - The user's script, ALREADY transpiled to JS by Bun.Transpiler
+ * @param ctxData        - Serialized context data to inject
+ * @param sharedScripts  - Map of script-name → absolute path for shared scripts
+ */
+export function buildPlainJsWrapper(
+  userJsSource: string,
+  ctxData: SerializedContext,
+  sharedScripts: Record<string, string>,
+): string {
+  const ctxJson = JSON.stringify(ctxData);
+
+  const sharedScriptDecls = Object.entries(sharedScripts)
+    .map(([name, path]) => {
+      const url = pathToFileURL(path).href;
+      return `const _script_${name} = await import(${JSON.stringify(url)});`;
+    })
+    .join('\n');
+
+  const scriptNames = Object.keys(sharedScripts)
+    .map(name => `${name}: _script_${name}`)
+    .join(', ');
+
+  return `
+${sharedScriptDecls}
+
+var __ctxData = ${ctxJson};
+var __logs = [];
+
+var ctx = {
+  env: __ctxData.env,
+  vars: __ctxData.vars,
+  request: __ctxData.request,
+  response: __ctxData.response,
+  scripts: { ${scriptNames} },
+
+  assert: function(condition, message) {
+    if (!condition) {
+      var err = new Error(message);
+      err.name = 'ShogunAssertionError';
+      throw err;
+    }
+  },
+
+  log: function(message) {
+    __logs.push(String(message));
+    if (process.env.SHOGUN_DEBUG) { process.stderr.write('[script] ' + String(message) + '\\n'); }
+  },
+
+  http: {
+    get: function(path, opts) { return __httpCall('GET', path, undefined, opts); },
+    post: function(path, body, opts) { return __httpCall('POST', path, body, opts); },
+    put: function(path, body, opts) { return __httpCall('PUT', path, body, opts); },
+    patch: function(path, body, opts) { return __httpCall('PATCH', path, body, opts); },
+    delete: function(path, opts) { return __httpCall('DELETE', path, undefined, opts); },
+  },
+};
+
+async function __httpCall(method, path, body, _opts) {
+  var baseUrl = (ctx.env && ctx.env.BASE_URL) ? ctx.env.BASE_URL : '';
+  var url = path.startsWith('http') ? path : baseUrl + path;
+  var headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (ctx.env && ctx.env.AUTH_TOKEN) {
+    var t = ctx.env.AUTH_TOKEN;
+    headers['Authorization'] = t.startsWith('Bearer ') ? t : 'Bearer ' + t;
+  }
+  if (_opts && _opts.headers && typeof _opts.headers === 'object') {
+    for (var k in _opts.headers) {
+      if (_opts.headers[k] !== undefined && _opts.headers[k] !== null) {
+        headers[k] = String(_opts.headers[k]);
+      }
+    }
+  }
+
+  ctx.log(method + ' ' + url);
+  if (body !== undefined) {
+    ctx.log('  request body: ' + JSON.stringify(body));
+  }
+  var safeHeaders = Object.assign({}, headers);
+  if (safeHeaders['Authorization']) {
+    safeHeaders['Authorization'] = safeHeaders['Authorization'].replace(/(Bearer\\s+)(.{4}).*/, '$1$2...');
+  }
+  ctx.log('  request headers: ' + JSON.stringify(safeHeaders));
+
+  var res = await fetch(url, {
+    method: method,
+    headers: headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  var text = await res.text();
+  var parsed = text;
+  try { parsed = JSON.parse(text); } catch (e) { /* keep string */ }
+
+  ctx.log('  <- ' + res.status);
+  if (res.status < 200 || res.status >= 300) {
+    var snippet = text.length > 500 ? text.slice(0, 500) + '...' : text;
+    ctx.log('  response body: ' + snippet);
+  }
+
+  return {
+    status: res.status,
+    body: parsed,
+    raw: text,
+    headers: Object.fromEntries(res.headers.entries()),
+    duration: 0,
+  };
+}
+
+var __errorMessage = null;
+
+try {
+  await (async () => {
+    ${userJsSource}
+  })();
+} catch (e) {
+  if (e && e.name === 'ShogunAssertionError') {
+    __errorMessage = e.message;
+  } else {
+    __errorMessage = (e && e.message) ? e.message : String(e);
+  }
+}
+
+return {
+  passed: __errorMessage === null,
+  error: __errorMessage !== null ? __errorMessage : undefined,
   request: ctx.request,
   vars: ctx.vars,
   logs: __logs,
 };
-process.stdout.write(JSON.stringify(__output) + '\\n');
 `;
 }
 
-async function executeScript(scriptFile: string): Promise<ScriptRunResult> {
-  const logs: string[] = [];
+// ---------------------------------------------------------------------------
+// Execution: Bun path (compiled binary)
+// ---------------------------------------------------------------------------
 
-  return new Promise((resolve) => {
-    // Use tsx to execute the TypeScript script
-    const proc = spawn('npx', ['tsx', scriptFile], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => {
-      const text = d.toString();
-      stderr += text;
-      // Collect [script] log lines
-      for (const line of text.split('\n')) {
-        if (line.startsWith('[script] ')) {
-          logs.push(line.slice(9));
-        }
-      }
-    });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        // Check if it's an assertion error
-        const assertMatch = stderr.match(/ShogunAssertionError: (.+)/);
-        const errorMsg = assertMatch
-          ? assertMatch[1]
-          : stderr.trim() || `Script exited with code ${code}`;
-
-        resolve({ passed: false, error: errorMsg, logs });
-        return;
-      }
-
-      // Parse JSON output from last line of stdout
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      const lastLine = lines[lines.length - 1];
-
-      try {
-        const output = JSON.parse(lastLine) as {
-          request?: Partial<ShogunRequest>;
-          vars?: Record<string, unknown>;
-          logs?: string[];
-        };
-        resolve({
-          passed: true,
-          logs: output.logs ?? [],
-          requestMutations: output.request,
-          varMutations: output.vars,
-        });
-      } catch {
-        resolve({ passed: true, logs });
-      }
-    });
-
-    proc.on('error', (err) => {
-      resolve({ passed: false, error: `Failed to spawn tsx: ${err.message}`, logs });
-    });
-  });
-}
-
-function loadSharedScriptImports(scriptsDir: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (!existsSync(scriptsDir)) return result;
-
-  const files = readdirSync(scriptsDir).filter(f => f.endsWith('.ts'));
-  for (const file of files) {
-    const name = file.replace('.ts', '');
-    result[name] = join(scriptsDir, file);
+/**
+ * Executes the script using Bun.Transpiler + AsyncFunction.
+ *
+ * Two-step approach:
+ * 1. Transpile ONLY the user's TypeScript snippet to JS (avoids ESM module
+ *    treatment that would forbid top-level `return`).
+ * 2. Wrap the transpiled JS in a plain JavaScript wrapper (no TS annotations)
+ *    and execute via `new AsyncFunction()` where `return` is legal.
+ *
+ * This path avoids writing temp files entirely, working around the Bun
+ * compiled binary's inability to resolve temp .mts file paths from its
+ * virtual filesystem (B/~BUN/root/shogun-win-x64).
+ */
+async function runScriptBun(
+  source: string,
+  ctxData: SerializedContext,
+  sharedScripts: Record<string, string>,
+): Promise<ScriptRunResult> {
+  const transpiler = getBunTranspiler();
+  if (!transpiler) {
+    return {
+      passed: false,
+      error: 'Bun.Transpiler is not available despite Bun runtime detection',
+      logs: [],
+    };
   }
-  return result;
+
+  // Step 1: Transpile ONLY the user's TypeScript snippet to JavaScript.
+  //
+  // CRITICAL: Pre-wrap the source in an async IIFE before transpiling.
+  // When Bun.Transpiler encounters top-level `await` in a snippet, it treats
+  // it as an ECMAScript module. In ESM, top-level `return` is illegal — only
+  // valid inside a function body. Many test authors use `return;` as an
+  // early-exit pattern in post-scripts. Without pre-wrapping, the combination
+  // of `return;` + `await` causes a transpilation error:
+  //   "Top-level return cannot be used inside an ECMAScript module"
+  //
+  // By wrapping in `await (async () => { ...user code... })()`, we:
+  //   - Make `return;` legal (inside a function body)
+  //   - Keep `await` legal (inside an async function)
+  //   - Preserve correct error propagation (re-thrown to the outer try/catch)
+  //   - Prevent ESM module detection at the snippet level
+  const wrappedSource = wrapUserSourceForTranspilation(source);
+
+  let jsUserSource: string;
+  try {
+    jsUserSource = transpiler.transformSync(wrappedSource);
+  } catch (err: any) {
+    return {
+      passed: false,
+      error: `Failed to transpile script: ${err?.message || String(err)}`,
+      logs: [],
+    };
+  }
+
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] Bun path: transpiled user source (${source.length} → ${jsUserSource.length} chars)\n`);
+  }
+
+  // Step 2: Build a plain JS wrapper around the transpiled user source.
+  // No TypeScript annotations → no ESM treatment → top-level return is legal.
+  const jsWrapper = buildPlainJsWrapper(jsUserSource, ctxData, sharedScripts);
+
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] Bun path: JS wrapper built (${jsWrapper.length} chars), executing via AsyncFunction\n`);
+  }
+
+  // Step 3: Execute via AsyncFunction (no temp files, no import()).
+  let fn: (...args: any[]) => Promise<any>;
+  try {
+    fn = new AsyncFunctionCtor(jsWrapper) as typeof fn;
+  } catch (err: any) {
+    return {
+      passed: false,
+      error: `Failed to create async function from transpiled script: ${err?.message || String(err)}`,
+      logs: [],
+    };
+  }
+
+  try {
+    const result = await fn();
+
+    if (!result || typeof result !== 'object') {
+      return {
+        passed: false,
+        error: 'Script returned an invalid result (expected object with passed/error/logs)',
+        logs: [],
+      };
+    }
+
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] Bun path: result passed=${result.passed}, error=${result.error ?? 'none'}, logs=${result.logs?.length ?? 0}\n`);
+    }
+
+    return {
+      passed: result.passed,
+      error: result.error,
+      logs: result.logs ?? [],
+      requestMutations: result.request,
+      varMutations: result.vars,
+    };
+  } catch (err: any) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] Bun path: execution threw: ${err?.message || String(err)}\n`);
+      process.stderr.write(`[scripter] stack: ${err?.stack ?? 'no stack'}\n`);
+    }
+    return {
+      passed: false,
+      error: `Script execution failed: ${err?.message || String(err)}`,
+      logs: [],
+    };
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Execution: Node path (dev mode with tsx)
+// ---------------------------------------------------------------------------
+
+/**
+ * Executes the script by writing a temp .mts file and using dynamic import().
+ * Works in dev mode where tsx is registered as the ESM loader.
+ */
+async function runScriptNode(
+  source: string,
+  ctxData: SerializedContext,
+  sharedScripts: Record<string, string>,
+): Promise<ScriptRunResult> {
+  const tmpId = randomBytes(6).toString('hex');
+  const scriptFile = join(tmpdir(), `shogun-script-${tmpId}.mts`);
+
+  const wrapper = buildScriptWrapper(source, ctxData, sharedScripts, 'export');
+  writeFileSync(scriptFile, wrapper, 'utf8');
+
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] Node path: scriptFile: ${scriptFile}\n`);
+    process.stderr.write(`[scripter] Node path: wrapper length: ${wrapper.length} chars\n`);
+    process.stderr.write(`[scripter] Node path: source snippet: ${source.slice(0, 120)}...\n`);
+  }
+
+  try {
+    const result = await executeScriptViaImport(scriptFile);
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] Node path: executeScript returned: passed=${result.passed}, error=${result.error ?? 'none'}, logs=${result.logs.length}\n`);
+    }
+    return result;
+  } finally {
+    cleanup(scriptFile);
+  }
+}
+
+/**
+ * Imports the temp .mts file via dynamic import().
+ * The tsx loader (registered as ESM loader in dev mode) handles TypeScript.
+ */
+async function executeScriptViaImport(scriptFile: string): Promise<ScriptRunResult> {
+  const scriptUrl = pathToFileURL(scriptFile).href;
+
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] executeScriptViaImport: importing ${scriptUrl}\n`);
+  }
+
+  try {
+    const mod = await import(scriptUrl);
+
+    if (process.env.SHOGUN_DEBUG) {
+      const exportKeys = mod ? Object.keys(mod) : [];
+      process.stderr.write(`[scripter] import resolved, exports: ${JSON.stringify(exportKeys)}\n`);
+      process.stderr.write(`[scripter] __result present: ${'__result' in (mod ?? {})}\n`);
+    }
+
+    const result = (mod as { __result?: any }).__result;
+
+    if (!result) {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[scripter] __result is undefined — module loaded but export missing\n`);
+      }
+      return {
+        passed: false,
+        error: `Script module loaded but __result export was missing (possible stale module cache or import failure)`,
+        logs: [],
+      };
+    }
+
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] __result: passed=${result.passed}, error=${result.error ?? 'none'}, logs=${result.logs?.length ?? 0}\n`);
+    }
+
+    return {
+      passed: result.passed,
+      error: result.error,
+      logs: result.logs ?? [],
+      requestMutations: result.request,
+      varMutations: result.vars,
+    };
+  } catch (err: any) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] import() threw: ${err?.message || String(err)}\n`);
+      process.stderr.write(`[scripter] error stack: ${err?.stack ?? 'no stack'}\n`);
+    }
+    return {
+      passed: false,
+      error: `Script execution failed: ${err?.message || String(err)}`,
+      logs: [],
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
 
 function cleanup(path: string): void {
   try {
     if (existsSync(path)) unlinkSync(path);
   } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a pre or post script in-process.
+ *
+ * Automatically selects the appropriate execution path:
+ * - Bun runtime: in-memory transpile (Bun.Transpiler) + AsyncFunction (no temp files)
+ * - Node runtime: temp .mts file + import() (tsx loader handles TypeScript)
+ *
+ * @param scriptSource - The user's inline TypeScript source code
+ * @param ctx          - Runtime context (env, vars, request, response, scriptsDir)
+ */
+export async function runScript(
+  scriptSource: string,
+  ctx: ScriptContext,
+): Promise<ScriptRunResult> {
+  const sharedScripts = loadSharedScriptPaths(ctx.scriptsDir);
+  const ctxData = serializeContext(ctx);
+
+  const transpiler = getBunTranspiler();
+  if (transpiler) {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[scripter] Using Bun execution path (in-memory transpile + AsyncFunction)\n`);
+    }
+    return runScriptBun(scriptSource, ctxData, sharedScripts);
+  }
+
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[scripter] Using Node execution path (temp file + import)\n`);
+  }
+  return runScriptNode(scriptSource, ctxData, sharedScripts);
 }

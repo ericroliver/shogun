@@ -1,0 +1,12 @@
+# Use LF line endings everywhere — CRLF causes issues with tooling
+# and cross-platform development. This ensures consistent LF in the
+# repo and on checkout regardless of OS.
+* text=auto eol=lf
+
+# Binary files — don't touch line endings
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -161,7 +161,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
       // Resolve the canonical ID from the actual file path — handles cross-collection
       // refs stored in _failures_ / _debug_ collections where collectionName is the
       // container collection but the file lives under a different collection dir.
-      const canonicalId = relative(collectionsDir, file).replace(/\.yaml$/, '');
+      const canonicalId = relative(collectionsDir, file).replace(/\.yaml$/, '').replace(/\\/g, '/');
       const actualCollection = canonicalId.includes('/')
         ? canonicalId.slice(0, canonicalId.indexOf('/'))
         : collectionName;
@@ -303,12 +303,18 @@ async function ensureCollectionSetup(
   // 2. Run collection's own setup script
   if (definition.setup) {
     try {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] running collection setup for "${collectionName}"\n`);
+      }
       const result = await runScript(definition.setup, {
         env: opts.env,
         vars: opts.vars,
         request: dummyRequest,
         scriptsDir: opts.scriptsDir,
       });
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] collection setup result: passed=${result.passed}, error=${result.error ?? 'none'}, varMutations=${JSON.stringify(result.varMutations ?? {}).slice(0, 300)}\n`);
+      }
       applyVarMutations(opts.vars, result.varMutations);
       if (!result.passed) {
         console.error(`Collection setup failed: ${result.error}`);
@@ -475,6 +481,9 @@ async function runSingleTest(
   if (test.pre) {
     const preStart = Date.now();
     try {
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] pre-script for "${test.name}" (${preMs}ms in)\n`);
+      }
       const preResult = await runScript(test.pre, {
         env: opts.env,
         vars: opts.vars,
@@ -482,6 +491,9 @@ async function runSingleTest(
         scriptsDir: opts.scriptsDir,
       });
       preMs = Date.now() - preStart;
+      if (process.env.SHOGUN_DEBUG) {
+        process.stderr.write(`[runner] pre-script done: passed=${preResult.passed}, preMs=${preMs}, error=${preResult.error ?? 'none'}, reqMutations=${JSON.stringify(preResult.requestMutations ?? {}).slice(0, 200)}, varMutations=${JSON.stringify(preResult.varMutations ?? {}).slice(0, 200)}\n`);
+      }
       scriptOutput.push(...preResult.logs);
       if (!preResult.passed) {
         return makeFailedResult(test.name, file, startMs, {}, `Pre-script failed: ${preResult.error}`, scriptOutput);
@@ -501,10 +513,16 @@ async function runSingleTest(
   // Execute HTTP request
   let response: ShogunResponse;
   try {
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[runner] executeRequest: ${request.method} ${request.url}\n`);
+    }
     response = await executeRequest(request, opts.env, {
-      timeout: parseInt(opts.env.TIMEOUT ?? '10', 10),
+      timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
     });
+    if (process.env.SHOGUN_DEBUG) {
+      process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
+    }
   } catch (err) {
     return makeFailedResult(test.name, file, startMs, {}, `curl failed: ${err}`, scriptOutput);
   }
@@ -557,6 +575,10 @@ async function runSingleTest(
   const durationMs = Date.now() - startMs;
   const curlMs = response.curlMs;
   const allPassed = assertionsAllPassed(assertions);
+  if (process.env.SHOGUN_DEBUG) {
+    process.stderr.write(`[runner] assertions: ${JSON.stringify(assertions)}\n`);
+    process.stderr.write(`[runner] allPassed=${allPassed}, needsBaseline=${needsBaseline}, finalStatus=${needsBaseline ? 'needs_baseline' : allPassed ? 'passed' : 'failed'}\n`);
+  }
   const finalStatus = needsBaseline ? 'needs_baseline' : allPassed ? 'passed' : 'failed';
 
   const timings: TestTimings = {
@@ -617,7 +639,7 @@ function updateFailuresCollection(
     .map(r => {
       // r.file is an absolute path like: …/collections/some-coll/test-name.yaml
       // We want: "some-coll/test-name"
-      const rel = relative(collectionsDir, r.file);          // "some-coll/test-name.yaml"
+      const rel = relative(collectionsDir, r.file).replace(/\\/g, '/');  // "some-coll/test-name.yaml"
       return rel.replace(/\.yaml$/, '');                     // "some-coll/test-name"
     })
     // Deduplicate (shouldn't happen, but be safe)
@@ -693,16 +715,16 @@ teardown: |
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildUrl(baseUrl: string, path: string): string {
+export function buildUrl(baseUrl: string, path: string): string {
   if (path.startsWith('http')) return path;
   return baseUrl.replace(/\/$/, '') + (path.startsWith('/') ? path : '/' + path);
 }
 
-function normalizeParams(params: Record<string, string | number | boolean>): Record<string, string> {
+export function normalizeParams(params: Record<string, string | number | boolean>): Record<string, string> {
   return Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
 }
 
-function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, baseUrl: string): ShogunRequest {
+export function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, baseUrl: string): ShogunRequest {
   const merged = { ...base, ...mutations };
   // Re-derive URL if path changed
   if (mutations.path && mutations.path !== base.path) {
@@ -711,14 +733,14 @@ function mergeRequest(base: ShogunRequest, mutations: Partial<ShogunRequest>, ba
   return merged;
 }
 
-function applyVarMutations(vars: Record<string, unknown>, varMutations?: Record<string, unknown>): void {
+export function applyVarMutations(vars: Record<string, unknown>, varMutations?: Record<string, unknown>): void {
   if (!varMutations) return;
   for (const [key, value] of Object.entries(varMutations)) {
     vars[key] = value;
   }
 }
 
-function makeDummyRequest(baseUrl: string): ShogunRequest {
+export function makeDummyRequest(baseUrl: string): ShogunRequest {
   return {
     method: 'GET',
     path: '/',
@@ -728,7 +750,7 @@ function makeDummyRequest(baseUrl: string): ShogunRequest {
   };
 }
 
-function makeFailedResult(
+export function makeFailedResult(
   name: string,
   file: string,
   startMs: number,

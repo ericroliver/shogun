@@ -144,6 +144,19 @@ export function renderPretty(
 
       console.log(`${riskIndicator}${methodPad} ${pathPad} ${testLabel.padEnd(8)} ${collectionNames}${riskLabel}${uncoveredMarker}${thinMarker}`);
 
+      // Surface untested response codes inline (base mode) so reviewers don't
+      // need a second command to learn *which* codes are missing.
+      if (testCount > 0) {
+        const rcc = rccMap.get(`${ep.method} ${ep.path}`);
+        if (rcc) {
+          const untested = rcc.allCodes.filter(c => c.status === 'untested');
+          if (untested.length > 0) {
+            const codes = untested.map(c => c.code).join(', ');
+            console.log(`    Untested codes: ${codes}  (documented in spec, no test declares them)`);
+          }
+        }
+      }
+
       // Detail view
       if (detail && testCount > 0) {
         // Risk breakdown

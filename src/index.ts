@@ -3,17 +3,25 @@
  * src/index.ts — shogun CLI entrypoint
  */
 
+// Bun runtime detection — declare global so TypeScript is satisfied
+// without requiring @types/bun as a dev dependency.
+declare const Bun: unknown;
+
 import { run } from './commands/run.js';
 import { snapshot } from './commands/snapshot.js';
 import { report } from './commands/report.js';
 import { lint } from './commands/lint.js';
 import { spec } from './commands/spec.js';
 import { coverage } from './commands/coverage/index.js';
+import { checkBackend } from './commands/check-backend.js';
+import { createBackend, getBackendSource } from './backend-factory.js';
+import { initExecutor, checkDependencies } from './executor.js';
 import { init } from './commands/init.js';
 // VERSION is a generated constant so it is always correct whether shogun is
 // run via tsx, via the compiled dist/, or as a standalone bun binary.
 // See scripts/gen-version.mjs — it is regenerated before every pkg:* build.
 import { VERSION } from './version.js';
+import { fileURLToPath } from 'node:url';
 
 function getVersion(): string {
   return VERSION;
@@ -35,10 +43,16 @@ Usage:
   shogun run --suite smoke            Run a named suite
   shogun run --file path/to/test.yaml Run single test file
   shogun run --format json            JSON output (for CI)
+  shogun run --backend unix           Force unix backend (curl + jq)
+  shogun run --backend powershell     Force PowerShell backend
 
   shogun snapshot                     Capture/update all baselines
   shogun snapshot --suite api-testapp-1  Snapshot with suite vars (workspace etc.)
   shogun snapshot --file path/...     Update single test baseline
+  shogun snapshot --backend powershell
+
+  shogun check-backend                Show backend info + dependency status
+  shogun check-backend --backend unix
 
   shogun report                       Show last run report
   shogun report --run <timestamp>     Show specific run
@@ -88,6 +102,7 @@ interface ParsedArgs {
   format?: 'pretty' | 'json' | 'tap' | 'markdown';
   run?: string;
   cwd?: string;
+  backend?: string;
   // spec-specific
   specSource?: string;
   endpoint?: string;
@@ -115,7 +130,7 @@ interface ParsedArgs {
   force?: boolean;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -137,6 +152,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       case '--file':       result.file = argv[++i]; break;
       case '--format':     result.format = argv[++i] as ParsedArgs['format']; break;
       case '--cwd':        result.cwd = argv[++i]; break;
+      case '--backend':    result.backend = argv[++i]; break;
       // spec flags
       case '--endpoint':   result.endpoint = argv[++i]; break;
       case '--method':     result.method = argv[++i]; break;
@@ -197,11 +213,35 @@ function parseArgs(argv: string[]): ParsedArgs {
   return result;
 }
 
+function getCliArgs(): string[] {
+  const argv = process.argv;
+
+  // Bun standalone executable:
+  // ["C:\\bin\\shogun.exe", "--help"]
+  if (
+    typeof Bun !== 'undefined' &&
+    argv[0]?.toLowerCase() === process.execPath.toLowerCase()
+  ) {
+    return argv.slice(1);
+  }
+
+  // Node / tsx:
+  // ["node.exe", "src/index.ts", "--help"]
+  return argv.slice(2);
+}
+
 async function main() {
-  const [, , subcommand, ...rest] = process.argv;
+  const [subcommand, ...rest] = getCliArgs();
 
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
+    // Parse any --backend flag that was provided alongside --help
+    const helpArgs = parseArgs(rest);
+    const backend = createBackend(helpArgs.backend);
+    const source = getBackendSource(helpArgs.backend);
+
     process.stdout.write(USAGE);
+    process.stdout.write(`\nBackend: ${backend.name} (selected via ${source})\n`);
+    process.stdout.write(`Run 'shogun check-backend' to verify dependencies.\n`);
     process.exit(0);
   }
 
@@ -214,6 +254,21 @@ async function main() {
 
   if (args.cwd) {
     process.chdir(args.cwd);
+  }
+
+  // -----------------------------------------------------------------------
+  // Wire up backend for commands that need it (run, snapshot, lint)
+  // check-backend wires its own backend.
+  // -----------------------------------------------------------------------
+  const needsBackend = ['run', 'snapshot', 'lint'].includes(subcommand);
+
+  if (needsBackend) {
+    const backend = createBackend(args.backend);
+    initExecutor(backend);
+
+    if (subcommand !== 'lint') {
+      await checkDependencies();
+    }
   }
 
   switch (subcommand) {
@@ -232,8 +287,13 @@ async function main() {
       process.exit(exitCode);
       break;
     }
+    case 'check-backend': {
+      const exitCode = await checkBackend({ backend: args.backend });
+      process.exit(exitCode);
+      break;
+    }
     case 'report': {
-      await report({ ...args, format: args.format as 'pretty' | 'json' | 'tap' | undefined });
+      await report({ ...args, format: args.format === 'markdown' ? 'pretty' : args.format as 'pretty' | 'json' | 'tap' | undefined });
       process.exit(0);
       break;
     }
@@ -291,7 +351,26 @@ async function main() {
   }
 }
 
-main().catch((err: unknown) => {
+/*
+// Only run main() when executed directly (not when imported for testing)
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err: unknown) => {
   console.error('Fatal error:', err);
   process.exit(1);
-});
+  });
+}
+*/
+
+// Run when invoked directly through Node/tsx or as a Bun standalone executable.
+const isDirectExecution =
+  typeof Bun !== 'undefined'
+    ? true
+    : process.argv[1] !== undefined &&
+      fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isDirectExecution) {
+  main().catch((err: unknown) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}

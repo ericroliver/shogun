@@ -145,7 +145,7 @@ export function printTestResult(result: TestResult): void {
 // Timing breakdown formatter
 // ---------------------------------------------------------------------------
 
-function formatTimings(result: TestResult): string {
+export function formatTimings(result: TestResult): string {
   const t = result.timings;
   if (!t) return '';
 
@@ -313,7 +313,7 @@ function printTap(summary: RunSummary): void {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getFailureReasons(assertions: AssertionResults): string[] {
+export function getFailureReasons(assertions: AssertionResults): string[] {
   const reasons: string[] = [];
 
   if (assertions.status === false) {

@@ -343,7 +343,7 @@ export async function lint(args: LintArgs): Promise<number> {
  * is "catch the obvious duplicate that esbuild would reject at top scope",
  * not "lint all JavaScript".
  */
-function findDuplicateDeclarations(
+export function findDuplicateDeclarations(
   source: string,
 ): Array<{ name: string; lines: number[] }> {
   // Track name → [line numbers where declared at depth 0]
@@ -426,7 +426,7 @@ function findDuplicateDeclarations(
  * match the heuristic — encodeURIComponent is correct for those because they
  * will never contain forward-slash path separators.
  */
-function findUnsafePathEncoding(
+export function findUnsafePathEncoding(
   source: string,
 ): Array<{ lineNo: number; line: string }> {
   const hits: Array<{ lineNo: number; line: string }> = [];

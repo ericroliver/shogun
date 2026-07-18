@@ -87,6 +87,25 @@ export interface TestEntry {
   // --- NEW: raw script bodies (Story 14 — dependency graph) ---
   preScriptBody?: string;   // raw pre script source (only stored if hasPreScript === true)
   postScriptBody?: string;  // raw post script source (only stored if hasPostScript === true)
+
+  // --- NEW: explicit covers annotation (405 method-guard / parent-path) ---
+  covers?: CoverAnnotation[];
+}
+
+/**
+ * Explicit coverage declaration. Allows a test to declare which spec endpoint
+ * and response code it covers, bypassing the normal method+path matching.
+ *
+ * Use cases:
+ *   - 405 method-guard tests that send a wrong HTTP method intentionally
+ *   - Parent-path tests that cover multiple child endpoints
+ *   - Sub-routes with literal UUIDs that don't template-match
+ */
+export interface CoverAnnotation {
+  /** Spec endpoint key, e.g. "POST /api/auth/login" */
+  endpoint: string;
+  /** Response code this test covers, e.g. 405 */
+  responseCode?: number;
 }
 
 export interface SpecParam {

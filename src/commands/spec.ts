@@ -39,7 +39,7 @@ export interface SpecArgs {
 // Minimal OpenAPI 3 types (only what we need)
 // ---------------------------------------------------------------------------
 
-interface OpenApiSpec {
+export interface OpenApiSpec {
   openapi?: string;
   info?: { title?: string; version?: string };
   paths?: Record<string, PathItem>;
@@ -88,7 +88,7 @@ interface ResponseObject {
   content?: Record<string, { schema?: SchemaObject | RefObject }>;
 }
 
-interface SchemaObject {
+export interface SchemaObject {
   type?: string | string[];   // OpenAPI 3.1 allows array syntax: ["string","null"]
   format?: string;
   nullable?: boolean;
@@ -104,11 +104,11 @@ interface SchemaObject {
   '$ref'?: string;
 }
 
-interface RefObject {
+export interface RefObject {
   '$ref': string;
 }
 
-function isRef(obj: unknown): obj is RefObject {
+export function isRef(obj: unknown): obj is RefObject {
   return typeof obj === 'object' && obj !== null && '$ref' in obj;
 }
 
@@ -466,7 +466,7 @@ interface ResolvedParam {
   enum?: unknown[];
 }
 
-interface ResolvedField {
+export interface ResolvedField {
   name: string;
   type: string;
   required: boolean;
@@ -698,7 +698,7 @@ function renderSchemaFieldsMarkdown(resolved: SchemaObject, required: string[]):
 
 const MAX_DEPTH = 2;
 
-function resolveSchema(schemaOrRef: SchemaObject | RefObject, openApi: OpenApiSpec, depth: number): SchemaObject {
+export function resolveSchema(schemaOrRef: SchemaObject | RefObject, openApi: OpenApiSpec, depth: number): SchemaObject {
   if (isRef(schemaOrRef)) {
     const name = refName(schemaOrRef['$ref']);
     const schemas = openApi.components?.schemas ?? {};
@@ -738,7 +738,7 @@ function resolveSchema(schemaOrRef: SchemaObject | RefObject, openApi: OpenApiSp
   return schemaOrRef;
 }
 
-function resolveSchemaShallow(schemaOrRef: SchemaObject | RefObject, openApi: OpenApiSpec): SchemaObject {
+export function resolveSchemaShallow(schemaOrRef: SchemaObject | RefObject, openApi: OpenApiSpec): SchemaObject {
   if (isRef(schemaOrRef)) {
     const name = refName(schemaOrRef['$ref']);
     const schemas = openApi.components?.schemas ?? {};
@@ -749,7 +749,7 @@ function resolveSchemaShallow(schemaOrRef: SchemaObject | RefObject, openApi: Op
   return schemaOrRef;
 }
 
-function schemaToFields(resolved: SchemaObject, openApi: OpenApiSpec): ResolvedField[] {
+export function schemaToFields(resolved: SchemaObject, openApi: OpenApiSpec): ResolvedField[] {
   const props = resolved.properties ?? {};
   const reqSet = new Set(resolved.required ?? []);
   const fields: ResolvedField[] = [];
@@ -780,12 +780,12 @@ function schemaToFields(resolved: SchemaObject, openApi: OpenApiSpec): ResolvedF
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'] as const;
 
-function refName(ref: string): string {
+export function refName(ref: string): string {
   // "#/components/schemas/Foo" → "Foo"
   return ref.split('/').pop() ?? ref;
 }
 
-function schemaTypeString(schema: SchemaObject | undefined): string {
+export function schemaTypeString(schema: SchemaObject | undefined): string {
   if (!schema) return 'unknown';
   // Normalise OpenAPI 3.1 array-type syntax: ["string","null"] → "string?"
   let typeStr: string | undefined;
@@ -819,7 +819,7 @@ function schemaTypeString(schema: SchemaObject | undefined): string {
   return typeStr ?? 'object';
 }
 
-function buildFlags(required: boolean, nullable: boolean): string {
+export function buildFlags(required: boolean, nullable: boolean): string {
   const parts: string[] = [];
   if (required) parts.push('(required)');
   if (nullable) parts.push('(nullable)');
