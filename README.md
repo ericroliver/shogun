@@ -26,15 +26,15 @@ npx shogun run --env QA
 
 ### Option 3 — Standalone binary (no Node.js required)
 
-Download a prebuilt binary from the [Releases page](https://github.com/your-org/shogun/releases):
+Download a prebuilt binary from the [Releases page](https://github.com/ericroliver/shogun/releases):
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/your-org/shogun/releases/latest/download/shogun-macos-arm64 \
+curl -L https://github.com/ericroliver/shogun/releases/latest/download/shogun-macos-arm64 \
   -o /usr/local/bin/shogun && chmod +x /usr/local/bin/shogun
 
 # Linux x64
-curl -L https://github.com/your-org/shogun/releases/latest/download/shogun-linux-x64 \
+curl -L https://github.com/ericroliver/shogun/releases/latest/download/shogun-linux-x64 \
   -o /usr/local/bin/shogun && chmod +x /usr/local/bin/shogun
 ```
 

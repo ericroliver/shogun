@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build all binaries
+        run: bun run pkg:all
+
+      - name: Rename Windows binary
+        run: mv bin/shogun-win-x64 bin/shogun-win-x64.exe
+
+      - name: Generate SHA256 checksums
+        working-directory: bin
+        run: |
+          sha256sum shogun-macos-arm64 \
+                    shogun-linux-x64 \
+                    shogun-linux-arm64 \
+                    shogun-win-x64.exe \
+            > checksums.txt
+          cat checksums.txt
+
+      - name: Determine pre-release
+        id: prerelease
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" =~ -(beta|rc|alpha|pre)(\.|$|\-) ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          files: |
+            bin/shogun-macos-arm64
+            bin/shogun-linux-x64
+            bin/shogun-linux-arm64
+            bin/shogun-win-x64.exe
+            bin/checksums.txt
