@@ -135,6 +135,17 @@ export interface ShogunRequest {
   body?: unknown;
 }
 
+/**
+ * A single Server-Sent Event parsed from an SSE response.
+ * Only populated when Content-Type is text/event-stream.
+ */
+export interface SseEvent {
+  /** SSE event type (from `event:` line, default: "message") */
+  event: string;
+  /** Parsed data from `data:` line(s). JSON-parsed if possible, else string. */
+  data: unknown;
+}
+
 export interface ShogunResponse {
   status: number;
   headers: Record<string, string>;
@@ -143,6 +154,12 @@ export interface ShogunResponse {
   duration: number;
   /** Time reported by curl's own %{time_total} (ms) */
   curlMs: number;
+  /**
+   * Parsed SSE events (only set when Content-Type is text/event-stream).
+   * Each entry has `{ event: string, data: unknown }`.
+   * For non-SSE responses, this is undefined.
+   */
+  events?: SseEvent[];
 }
 
 export type HttpMethod = {
