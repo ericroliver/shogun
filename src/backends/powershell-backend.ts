@@ -193,9 +193,10 @@ export function buildPsHeaders(
   req: ShogunRequest,
   env: EnvVars,
   autoInjectAuth: boolean = true,
+  contentType: string = 'application/json',
 ): Record<string, string> {
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': contentType,
     'Accept': 'application/json',
     ...req.headers,
   };
@@ -331,7 +332,7 @@ export class PowerShellBackend implements BackendExecutor {
     const maxRedirs = opts.followRedirects === false ? 0 : 5;
     const url = buildPsUrl(req);
     const method = req.method.toUpperCase();
-    const headers = buildPsHeaders(req, env, opts.autoInjectAuth !== false);
+    const headers = buildPsHeaders(req, env, opts.autoInjectAuth !== false, opts.contentType);
     const bodyArg = buildBodyArg(req);
     const cookiesJson = JSON.stringify(this.cookies);
 

@@ -81,6 +81,12 @@ export interface ScriptContext {
   request: ShogunRequest;
   response?: ShogunResponse;
   scriptsDir: string;
+  /**
+   * Default Content-Type header for http calls made from pre/post scripts.
+   * Falls back to 'application/json' if not provided.
+   * Sourced from config.defaults.content_type.
+   */
+  defaultContentType?: string;
 }
 
 /** Plain-data representation of the context, safe for JSON serialization. */
@@ -89,6 +95,7 @@ export interface SerializedContext {
   vars: SharedVars;
   request: ShogunRequest;
   response: ShogunResponse | null;
+  defaultContentType?: string;
 }
 
 /**
@@ -101,6 +108,7 @@ export function serializeContext(ctx: ScriptContext): SerializedContext {
     vars: ctx.vars,
     request: ctx.request,
     response: ctx.response ?? null,
+    defaultContentType: ctx.defaultContentType,
   };
 }
 
@@ -248,7 +256,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   const baseUrl = ctx.env.BASE_URL ?? '';
   const url = path.startsWith('http') ? path : baseUrl + path;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': ctx.defaultContentType ?? 'application/json',
     Accept: 'application/json',
   };
   if (ctx.env.AUTH_TOKEN) {
@@ -415,7 +423,7 @@ async function __httpCall(method, path, body, _opts) {
   var baseUrl = (ctx.env && ctx.env.BASE_URL) ? ctx.env.BASE_URL : '';
   var url = path.startsWith('http') ? path : baseUrl + path;
   var headers = {
-    'Content-Type': 'application/json',
+    'Content-Type': (ctx.defaultContentType || 'application/json'),
     'Accept': 'application/json',
   };
   if (ctx.env && ctx.env.AUTH_TOKEN) {

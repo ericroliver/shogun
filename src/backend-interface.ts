@@ -45,6 +45,12 @@ export interface ExecutorOptions {
    * Pass false to disable — auth must be wired explicitly in pre-scripts.
    */
   autoInjectAuth?: boolean;
+  /**
+   * Default Content-Type header for requests that don't specify one.
+   * Falls back to 'application/json' if not provided.
+   * Sourced from config.defaults.content_type.
+   */
+  contentType?: string;
 }
 
 export interface BackendExecutor {

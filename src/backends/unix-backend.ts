@@ -57,6 +57,12 @@ export interface ExecutorOptions {
    * Pass false to disable — auth must be wired explicitly in pre-scripts.
    */
   autoInjectAuth?: boolean;
+  /**
+   * Default Content-Type header for requests that don't specify one.
+   * Falls back to 'application/json' if not provided.
+   * Sourced from config.defaults.content_type.
+   */
+  contentType?: string;
 }
 
 /**
@@ -73,7 +79,7 @@ export async function executeRequest(
   const bodyOutFile = join(tmpdir(), `shogun-body-${tmpId}.tmp`);
 
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': opts.contentType ?? 'application/json',
     'Accept': 'application/json',
     ...req.headers,
   };

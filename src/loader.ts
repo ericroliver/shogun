@@ -202,7 +202,7 @@ export function loadEnv(envName: string, config: ShogunConfig, cwd: string = pro
   return result.parsed ?? {};
 }
 
-function listEnvFiles(envsDir: string): string[] {
+export function listEnvFiles(envsDir: string): string[] {
   if (!existsSync(envsDir)) return [];
   return readdirSync(envsDir)
     .filter(f => f.endsWith('.env') && !f.endsWith('.env.example'))
