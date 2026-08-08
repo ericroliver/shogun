@@ -32,6 +32,9 @@ import type {
   SpecDriftEntry,
   SpecDriftReport,
   RunDelta,
+  McpCoverageReport,
+  McpMethodCoverage,
+  McpToolCoverage,
 } from './types.js';
 import type { CoverageRiskWeights, RunSummary } from '../../types.js';
 
@@ -81,6 +84,7 @@ export function buildSummary(
   riskScores?: EndpointRiskScore[],
   testingProfiles?: EndpointTestingProfile[],
   specDrift?: SpecDriftReport | null,
+  mcpCoverage?: McpCoverageReport | null,
 ): CoverageSummary {
   const coveredEndpoints = specEndpoints.filter(e => e.tests.length > 0).length;
   const uncoveredEndpoints = specEndpoints.length - coveredEndpoints;
@@ -148,6 +152,7 @@ export function buildSummary(
       ? testingProfiles.filter(p => p.negativeRatio.onlyHappyPath).length
       : 0,
     specDriftCount: specDrift ? specDrift.entries.length : 0,
+    mcpCoverage: mcpCoverage ?? null,
   };
 }
 
@@ -998,5 +1003,76 @@ export function computeRunDelta(
     testsNowFailing: testsNowFailing.sort(),
     endpointCoverageDelta,
     passRateDelta,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MCP / JSON-RPC coverage (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute MCP / JSON-RPC coverage from test entries.
+ *
+ * Returns null if no tests have a jsonrpcMethod (i.e. no MCP tests in the suite).
+ * Otherwise, returns a report with:
+ *   - Per JSON-RPC method counts (tools/call, initialize, tools/list, etc.)
+ *   - Per MCP tool name counts (only for tools/call methods)
+ *   - Count of tools/call tests with no tool name extracted (potential issue)
+ */
+export function computeMcpCoverage(testEntries: TestEntry[]): McpCoverageReport | null {
+  const mcpTests = testEntries.filter(t => t.jsonrpcMethod !== undefined);
+  if (mcpTests.length === 0) return null;
+
+  // Group by JSON-RPC method
+  const methodMap = new Map<string, Array<{ name: string; file: string; collection: string }>>();
+  for (const test of mcpTests) {
+    const method = test.jsonrpcMethod!;
+    if (!methodMap.has(method)) methodMap.set(method, []);
+    methodMap.get(method)!.push({
+      name: test.name,
+      file: test.file,
+      collection: test.collection,
+    });
+  }
+
+  const methods: McpMethodCoverage[] = [...methodMap.entries()]
+    .map(([method, tests]) => ({
+      method,
+      testCount: tests.length,
+      tests: tests.sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => b.testCount - a.testCount);
+
+  // Group by MCP tool name (only for tools/call)
+  const toolMap = new Map<string, Array<{ name: string; file: string; collection: string }>>();
+  let unnamedToolCallCount = 0;
+
+  for (const test of mcpTests) {
+    if (test.jsonrpcMethod !== 'tools/call') continue;
+    if (test.mcpToolName) {
+      if (!toolMap.has(test.mcpToolName)) toolMap.set(test.mcpToolName, []);
+      toolMap.get(test.mcpToolName)!.push({
+        name: test.name,
+        file: test.file,
+        collection: test.collection,
+      });
+    } else {
+      unnamedToolCallCount++;
+    }
+  }
+
+  const tools: McpToolCoverage[] = [...toolMap.entries()]
+    .map(([tool, tests]) => ({
+      tool,
+      testCount: tests.length,
+      tests: tests.sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => b.testCount - a.testCount);
+
+  return {
+    totalMcpTests: mcpTests.length,
+    methods,
+    tools,
+    unnamedToolCallCount,
   };
 }

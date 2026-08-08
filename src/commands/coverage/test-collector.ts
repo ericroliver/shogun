@@ -111,6 +111,9 @@ export async function collectTestEntries(
       // --- Covers annotation (explicit endpoint+responseCode declarations) ---
       const covers = extractCovers(p);
 
+      // --- MCP / JSON-RPC metadata extraction (Phase 1 + 2) ---
+      const mcp = extractMcpMetadata(req, filePath, hasPreScript ? (preScript as string) : undefined);
+
       entries.push({
         name,
         file: relPath,
@@ -129,6 +132,8 @@ export async function collectTestEntries(
         preScriptBody: hasPreScript ? (preScript as string) : undefined,
         postScriptBody: hasPostScript ? (postScript as string) : undefined,
         covers,
+        jsonrpcMethod: mcp.method,
+        mcpToolName: mcp.tool,
       });
     }
   }
@@ -438,4 +443,158 @@ function parseCoverString(s: string): CoverAnnotation | null {
     endpoint: `${method} ${path}`,
     responseCode: code,
   };
+}
+
+// ---------------------------------------------------------------------------
+// MCP / JSON-RPC metadata extraction (Phase 1 + 2)
+// ---------------------------------------------------------------------------
+
+export interface McpMetadata {
+  method: string | undefined;   // JSON-RPC method, e.g. "tools/call"
+  tool: string | undefined;     // tool name when method === "tools/call"
+}
+
+/**
+ * Extract JSON-RPC method and MCP tool name from a test's request body.
+ *
+ * Sources, checked in order:
+ *   1. Inline request body (if body.inline is a JSON-RPC envelope)
+ *   2. Fixture file (if body.file points to a JSON file with JSON-RPC)
+ *   3. Pre-script body assignment (if ctx.request.body is set to a JSON-RPC string)
+ *
+ * Returns { method: undefined, tool: undefined } if no JSON-RPC envelope is found.
+ */
+export function extractMcpMetadata(
+  req: Record<string, unknown>,
+  testFilePath: string,
+  preScript?: string,
+): McpMetadata {
+  // 1. Try inline body
+  const inlineBody = (req['body'] as Record<string, unknown> | undefined)?.['inline'];
+  if (inlineBody && typeof inlineBody === 'object' && !Array.isArray(inlineBody)) {
+    const result = extractJsonRpcFromObject(inlineBody as Record<string, unknown>);
+    if (result.method) return result;
+  }
+
+  // 2. Try fixture file
+  const fileRef = (req['body'] as Record<string, unknown> | undefined)?.['file'];
+  if (typeof fileRef === 'string') {
+    const fixturePath = join(dirname(testFilePath), fileRef);
+    if (existsSync(fixturePath)) {
+      try {
+        const fixtureRaw = readFileSync(fixturePath, 'utf8');
+        const fixture = JSON.parse(fixtureRaw);
+        if (fixture && typeof fixture === 'object' && !Array.isArray(fixture)) {
+          const result = extractJsonRpcFromObject(fixture as Record<string, unknown>);
+          if (result.method) return result;
+        }
+      } catch {
+        // Invalid JSON or not a JSON-RPC envelope — swallow
+      }
+    }
+  }
+
+  // 3. Try pre-script
+  if (preScript) {
+    const result = extractJsonRpcFromScript(preScript);
+    if (result.method) return result;
+  }
+
+  return { method: undefined, tool: undefined };
+}
+
+/**
+ * Extract JSON-RPC method and tool name from a parsed object.
+ * Recognises the standard JSON-RPC 2.0 envelope: { jsonrpc: "2.0", method: "...", params: {...} }
+ * For tools/call, extracts params.name as the tool name.
+ */
+function extractJsonRpcFromObject(obj: Record<string, unknown>): McpMetadata {
+  // Must have a "jsonrpc" field (version string) and a "method" string
+  const jsonrpc = obj['jsonrpc'];
+  const method = obj['method'];
+
+  if (typeof method !== 'string') return { method: undefined, tool: undefined };
+  // Accept any jsonrpc version field (usually "2.0") or even absent — some
+  // request bodies might omit it. The method field is the key discriminator.
+  if (jsonrpc !== undefined && typeof jsonrpc !== 'string') {
+    return { method: undefined, tool: undefined };
+  }
+
+  // Extract tool name for tools/call
+  let tool: string | undefined;
+  if (method === 'tools/call') {
+    const params = obj['params'];
+    if (params && typeof params === 'object' && !Array.isArray(params)) {
+      const name = (params as Record<string, unknown>)['name'];
+      if (typeof name === 'string') {
+        tool = name;
+      }
+    }
+  }
+
+  return { method, tool };
+}
+
+/**
+ * Extract JSON-RPC method and tool name from a pre/post script.
+ * Recognises patterns like:
+ *   ctx.request.body = JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name: "..." } });
+ *   ctx.request.body = JSON.stringify(buildToolCall("tool_name", args));
+ *   const body = { jsonrpc: "2.0", method: "initialize", params: {} };
+ *   ctx.request.body = JSON.stringify(body);
+ */
+function extractJsonRpcFromScript(script: string): McpMetadata {
+  // Strategy 0: Check for buildToolCall("tool_name", ...) pattern first
+  // This pattern doesn't contain jsonrpc/method/params keys, so the quick
+  // check below would skip it.
+  const buildToolCallRegex = /buildToolCall\s*\(\s*["']([^"']+)["']/;
+  const buildMatch = buildToolCallRegex.exec(script);
+  if (buildMatch) {
+    return { method: 'tools/call', tool: buildMatch[1] };
+  }
+
+  // Strategy 1: Look for an inline object literal with a "method" key
+  // Accept both quoted ("jsonrpc":) and unquoted (jsonrpc:) key styles
+  const methodRegex = /["']?(?:jsonrpc|method|params)["']?\s*:/g;
+  if (!methodRegex.test(script)) {
+    // Quick check: no JSON-RPC-looking keys → skip
+    return { method: undefined, tool: undefined };
+  }
+
+  // Strategy 2: Find object literals assigned to ctx.request.body
+  const assignRegex = /ctx\.request\.body\s*=\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = assignRegex.exec(script)) !== null) {
+    const start = m.index + m[0].length;
+    const slice = script.slice(start);
+
+    // Strip JSON.stringify( wrapper
+    const stringifyMatch = /^JSON\.stringify\s*\(\s*/.exec(slice);
+    let cursor = start;
+    if (stringifyMatch) {
+      cursor += stringifyMatch[0].length;
+    }
+
+    const obj = tryExtractObjectLiteral(script, cursor);
+    if (obj) {
+      const result = extractJsonRpcFromObject(obj);
+      if (result.method) return result;
+    }
+  }
+
+  // Strategy 3: Look for a variable assigned then used as body
+  // e.g. const rpcBody = { method: "tools/list", ... }; ctx.request.body = JSON.stringify(rpcBody);
+  const varAssignRegex = /(?:const|let|var)\s+(\w+)\s*=\s*/g;
+  let vm: RegExpExecArray | null;
+  while ((vm = varAssignRegex.exec(script)) !== null) {
+    const varName = vm[1]!;
+    const start = vm.index + vm[0].length;
+    const obj = tryExtractObjectLiteral(script, start);
+    if (obj) {
+      const result = extractJsonRpcFromObject(obj);
+      if (result.method) return result;
+    }
+  }
+
+  return { method: undefined, tool: undefined };
 }
