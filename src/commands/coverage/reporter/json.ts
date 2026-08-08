@@ -20,6 +20,7 @@ import type {
   DependencyGraph,
   SpecDriftReport,
   RunDelta,
+  McpCoverageReport,
 } from '../types.js';
 import { groupEndpointsByTag, sortedTagNames } from '../analyzer.js';
 
@@ -38,6 +39,7 @@ export function renderJson(
   dependencyGraph?: DependencyGraph | null,
   specDrift?: SpecDriftReport | null,
   delta?: RunDelta | null,
+  mcpCoverage?: McpCoverageReport | null,
 ): string {
   // Build lookups by specKey
   const rccMap = new Map<string, EndpointResponseCodeCoverage>();
@@ -199,6 +201,9 @@ export function renderJson(
   }
   if (delta) {
     output.delta = delta;
+  }
+  if (mcpCoverage) {
+    output.mcpCoverage = mcpCoverage;
   }
   return JSON.stringify(output, null, 2);
 }

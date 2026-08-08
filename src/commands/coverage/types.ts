@@ -90,6 +90,10 @@ export interface TestEntry {
 
   // --- NEW: explicit covers annotation (405 method-guard / parent-path) ---
   covers?: CoverAnnotation[];
+
+  // --- NEW: MCP / JSON-RPC metadata (Phase 1 + 2) ---
+  jsonrpcMethod?: string;     // JSON-RPC method, e.g. "tools/call", "initialize", "tools/list"
+  mcpToolName?: string;       // tool name when jsonrpcMethod === "tools/call", e.g. "enigma_get_agent_status"
 }
 
 /**
@@ -408,6 +412,40 @@ export interface CoverageSummary {
   suiteNegativeRatio: NegativeTestingRatio;  // suite-wide aggregate
   onlyHappyPathCount: number;                // endpoints with only 2xx tests
   specDriftCount: number;                    // total drift entries (0 if no run data)
+  mcpCoverage?: McpCoverageReport | null;    // MCP / JSON-RPC coverage (null if no MCP tests)
+}
+
+// ---------------------------------------------------------------------------
+// MCP / JSON-RPC coverage (Phase 3)
+// ---------------------------------------------------------------------------
+
+export interface McpMethodCoverage {
+  /** JSON-RPC method name, e.g. "tools/call", "initialize", "tools/list" */
+  method: string;
+  /** Number of tests exercising this method */
+  testCount: number;
+  /** Test names for this method */
+  tests: Array<{ name: string; file: string; collection: string }>;
+}
+
+export interface McpToolCoverage {
+  /** MCP tool name, e.g. "enigma_get_agent_status" */
+  tool: string;
+  /** Number of tests exercising this tool */
+  testCount: number;
+  /** Test names for this tool */
+  tests: Array<{ name: string; file: string; collection: string }>;
+}
+
+export interface McpCoverageReport {
+  /** Total tests with JSON-RPC method extracted */
+  totalMcpTests: number;
+  /** Distinct JSON-RPC methods exercised */
+  methods: McpMethodCoverage[];
+  /** Distinct MCP tools exercised (only for tools/call) */
+  tools: McpToolCoverage[];
+  /** Number of tests with tools/call but no tool name extracted (potential issue) */
+  unnamedToolCallCount: number;
 }
 
 // ---------------------------------------------------------------------------

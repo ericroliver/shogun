@@ -28,6 +28,7 @@ import type {
   DependencyGraph,
   SpecDriftReport,
   RunDelta,
+  McpCoverageReport,
 } from './types.js';
 import { extractSpecEndpoints } from './spec-extractor.js';
 import { collectTestEntries } from './test-collector.js';
@@ -44,6 +45,7 @@ import {
   buildDependencyGraph,
   computeSpecDrift,
   computeRunDelta,
+  computeMcpCoverage,
 } from './analyzer.js';
 import { loadRunForCoverage, joinRunResultsToTests, loadTwoRunsForCompare } from './run-loader.js';
 import { renderPretty } from './reporter/pretty.js';
@@ -149,11 +151,12 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
     const riskScores = computeRiskScores(specEndpoints, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, coverageConfig.riskWeights);
     const testingProfiles = computeTestingProfiles(specEndpoints, coverageConfig.expectedTagsByMethod);
     const specDrift = computeSpecDrift(specEndpoints, resolveSuppressedDrift(coverageConfig.suppressDrift, args.suppressDrift));
+    const mcpCoverage = computeMcpCoverage(testEntries);
 
-    const summary = buildSummary(openApi, specEndpoints, testEntries, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, specDrift);
+    const summary = buildSummary(openApi, specEndpoints, testEntries, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, specDrift, mcpCoverage);
 
     if (args.format === 'json') {
-      const jsonOutput = renderJson(summary, specEndpoints, false, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, undefined, false, null, specDrift, delta);
+      const jsonOutput = renderJson(summary, specEndpoints, false, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, undefined, false, null, specDrift, delta, mcpCoverage);
       writeOutput(jsonOutput, args.out);
     } else {
       const compareOutput = renderCompare(summary, delta);
@@ -240,6 +243,9 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
     dependencyGraph = buildDependencyGraph(testEntries);
   }
 
+  // 14b. Compute MCP coverage (Phase 3)
+  const mcpCoverage: McpCoverageReport | null = computeMcpCoverage(testEntries);
+
   // 15. Build summary
   const summary = buildSummary(
     openApi,
@@ -252,6 +258,7 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
     riskScores,
     testingProfiles,
     specDrift,
+    mcpCoverage,
   );
 
   // 16. Render
@@ -259,7 +266,7 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
   const gapsMode = args.gaps ?? args.uncovered ?? false;
 
   if (format === 'json') {
-    const jsonOutput = renderJson(summary, specEndpoints, gapsMode, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, gaps, gapsMode, dependencyGraph, specDrift);
+    const jsonOutput = renderJson(summary, specEndpoints, gapsMode, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, gaps, gapsMode, dependencyGraph, specDrift, null, mcpCoverage);
     writeOutput(jsonOutput, args.out);
     return evaluateThresholds(summary, coverageConfig, args);
   }
@@ -303,7 +310,7 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
   }
 
   // Pretty — capture output as string for --out support
-  let prettyOutput = renderPrettyStr(summary, specEndpoints, false, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, args.detail ?? false, runSummary, specDrift);
+  let prettyOutput = renderPrettyStr(summary, specEndpoints, false, responseCodeCoverage, parameterCoverage, bodyFieldCoverage, qualityScores, riskScores, testingProfiles, args.detail ?? false, runSummary, specDrift, mcpCoverage);
   if (dependencyGraph) {
     prettyOutput += renderDepsStr(dependencyGraph);
   }
@@ -463,6 +470,7 @@ function renderPrettyStr(
   detail: boolean = false,
   runSummary?: RunSummary | null,
   specDrift?: SpecDriftReport | null,
+  mcpCoverage?: McpCoverageReport | null,
 ): string {
   const lines: string[] = [];
   const origLog = console.log;
@@ -500,6 +508,35 @@ function renderPrettyStr(
         const codes = specDrift.suppressedCodes.join(', ');
         console.log(`Suppressed drift: ${specDrift.suppressedCount} occurrences of [${codes}] across ${specDrift.suppressedEndpointCount} endpoints hidden (cross-cutting concern).`);
         console.log(`  Use --suppress-drift "" or coverage.suppressDrift: [] in config to reveal.`);
+        console.log('');
+      }
+    }
+
+    // MCP / JSON-RPC coverage section (Phase 3)
+    if (mcpCoverage) {
+      console.log('── MCP / JSON-RPC Coverage ' + '─'.repeat(41));
+      console.log('');
+      console.log(`MCP tests: ${mcpCoverage.totalMcpTests}`);
+      console.log('');
+
+      if (mcpCoverage.methods.length > 0) {
+        console.log('JSON-RPC Methods:');
+        for (const m of mcpCoverage.methods) {
+          console.log(`  ${m.method.padEnd(30)} ${m.testCount} test${m.testCount === 1 ? '' : 's'}`);
+        }
+        console.log('');
+      }
+
+      if (mcpCoverage.tools.length > 0) {
+        console.log('MCP Tools (tools/call):');
+        for (const t of mcpCoverage.tools) {
+          console.log(`  ${t.tool.padEnd(40)} ${t.testCount} test${t.testCount === 1 ? '' : 's'}`);
+        }
+        console.log('');
+      }
+
+      if (mcpCoverage.unnamedToolCallCount > 0) {
+        console.log(`  ⚠️  ${mcpCoverage.unnamedToolCallCount} tools/call test(s) with no tool name extracted (check pre-scripts)`);
         console.log('');
       }
     }
