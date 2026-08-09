@@ -116,6 +116,76 @@ export function renderSqlPretty(
 
   lines.push('');
 
+  // --- Live DB introspection section ---
+  if (summary.hasLiveData && summary.dbTotalProcs !== null && summary.dbTotalProcs !== undefined) {
+    lines.push('── Live Database Introspection ' + '─'.repeat(22));
+    lines.push('');
+    lines.push(`  DB procedures:     ${summary.dbTotalProcs}`);
+    lines.push(`  Tested in DB:      ${summary.dbTestedProcs ?? 0}`);
+    lines.push(`  Untested in DB:    ${summary.dbUntestedProcs ?? 0}`);
+
+    const dbCoveragePct = summary.dbTotalProcs > 0
+      ? Math.round(((summary.dbTestedProcs ?? 0) / summary.dbTotalProcs) * 1000) / 10
+      : 0;
+    lines.push(`  DB coverage:       ${dbCoveragePct}%`);
+    lines.push('');
+
+    // Untested procs table
+    if (summary.untestedProcs && summary.untestedProcs.length > 0) {
+      lines.push('── Untested Procedures (in DB, no test files) ' + '─'.repeat(8));
+      lines.push('');
+
+      const untestedProcWidth = Math.max(
+        ...summary.untestedProcs.map(p => p.qualifiedName.length), 25,
+      );
+      const untestedConnWidth = Math.max(
+        ...summary.untestedProcs.map(p => p.connection.length), 12,
+      );
+
+      lines.push(`  ${'Procedure'.padEnd(untestedProcWidth)}  ${'Connection'.padEnd(untestedConnWidth)}  Parameters`);
+      lines.push(`  ${'─'.repeat(untestedProcWidth)}  ${'─'.repeat(untestedConnWidth)}  ${'─'.repeat(30)}`);
+
+      for (const proc of summary.untestedProcs) {
+        const inputParams = proc.parameters.filter(p => !p.isOutput);
+        const paramSummary = inputParams.length > 0
+          ? inputParams.map(p => `${p.name}:${p.dataType}`).join(', ')
+          : '(none)';
+        lines.push(`  ${proc.qualifiedName.padEnd(untestedProcWidth)}  ${proc.connection.padEnd(untestedConnWidth)}  ${paramSummary}`);
+      }
+      lines.push('');
+    }
+
+    // Per-proc parameter coverage (only for procs with DB metadata)
+    const liveProcs = procs.filter(p => p.dbMetadata);
+    if (liveProcs.length > 0) {
+      lines.push('── Parameter Coverage (DB vs Tests) ' + '─'.repeat(14));
+      lines.push('');
+
+      for (const proc of liveProcs) {
+        const inputParams = proc.dbMetadata!.parameters.filter(p => !p.isOutput);
+        if (inputParams.length === 0) continue;
+
+        const exercised = proc.exercisedParams ?? [];
+        const untested = proc.untestedParams ?? [];
+        const phantom = proc.phantomParams ?? [];
+
+        lines.push(`  ${proc.proc} (${proc.connection})`);
+        lines.push(`    DB input params:  ${inputParams.length} — ${inputParams.map(p => `${p.name}:${p.dataType}`).join(', ')}`);
+
+        if (exercised.length > 0) {
+          lines.push(`    Exercised:       ${exercised.length} / ${inputParams.length} — ${exercised.join(', ')}`);
+        }
+        if (untested.length > 0) {
+          lines.push(`    ⚠ Untested:       ${untested.length} — ${untested.join(', ')}`);
+        }
+        if (phantom.length > 0) {
+          lines.push(`    ⚠ Phantom:        ${phantom.length} — ${phantom.join(', ')} (in YAML, not in DB)`);
+        }
+        lines.push('');
+      }
+    }
+  }
+
   // --- Detail: per-param-set breakdown ---
   if (detail) {
     lines.push('── Parameter Set Detail ' + '─'.repeat(28));
@@ -166,6 +236,14 @@ export function renderSqlPretty(
     : 0;
   lines.push(`Coverage: ${summary.baselinedProcs}/${summary.totalProcs} procedures baselined (${coveragePct}%)`);
   lines.push(`Parameter sets: ${summary.totalParamSets} total across ${summary.totalProcs} procedures`);
+
+  // Live coverage summary
+  if (summary.hasLiveData && summary.dbTotalProcs !== null && summary.dbTotalProcs !== undefined) {
+    const dbCoveragePct = summary.dbTotalProcs > 0
+      ? Math.round(((summary.dbTestedProcs ?? 0) / summary.dbTotalProcs) * 1000) / 10
+      : 0;
+    lines.push(`DB coverage: ${summary.dbTestedProcs ?? 0}/${summary.dbTotalProcs} procedures tested (${dbCoveragePct}%)`);
+  }
 
   return lines.join('\n') + '\n';
 }

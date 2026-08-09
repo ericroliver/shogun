@@ -18,7 +18,13 @@ import {
   groupByProc,
   joinRunResultsToSqlTests,
   buildSqlCoverageSummary,
+  mergeLiveGaps,
 } from './sql-analyzer.js';
+import {
+  compareTestedVsDatabase,
+  collectLiveGaps,
+  buildParamCoverage,
+} from './sql-live-analyzer.js';
 import { renderSqlPretty } from './reporter/sql-pretty.js';
 import { renderSqlJson } from './reporter/sql-json.js';
 import { renderSqlMarkdown } from './reporter/sql-markdown.js';
@@ -611,8 +617,64 @@ async function runSqlCoverage(
   // 3. Build proc coverage matrix
   const procs = groupByProc(sqlEntries);
 
-  // 4. Build summary
-  const sqlSummary = buildSqlCoverageSummary(sqlEntries, procs, hasRunData);
+  // 3b. Live DB introspection (--live flag)
+  let liveSummary: import('./types.js').SqlCoverageSummary | null = null;
+  const allUntestedProcs: import('./types.js').SqlUntestedProc[] = [];
+
+  if (args.live && config.connections) {
+    // Import driver registry + connection resolver (lazy — only for --live)
+    const { SqlDriverRegistry } = await import('../../sql-driver.js');
+    // Import the MSSQL driver so it registers itself
+    await import('../../drivers/mssql-driver.js');
+    const { resolveSqlConnection } = await import('../../loader.js');
+
+    // Get distinct connections used by SQL tests
+    const testedConnections = [...new Set(procs.map(p => p.connection))];
+
+    for (const connName of testedConnections) {
+      const connConfig = resolveSqlConnection(connName, config, env);
+      if (!connConfig) {
+        console.error(`Warning: connection "${connName}" not found in config — skipping live introspection for this connection.`);
+        continue;
+      }
+
+      try {
+        // Get the driver and introspect
+        const driver = SqlDriverRegistry.get(connConfig.driver);
+        const timeout = connConfig.timeout ?? 30;
+        const dbProcs = await driver.listProcedures(connConfig, timeout);
+
+        // Compare tested vs database
+        const untested = compareTestedVsDatabase(procs, dbProcs, connName);
+        allUntestedProcs.push(...untested);
+      } catch (err) {
+        console.error(`Warning: live introspection failed for connection "${connName}": ${(err as Error).message}`);
+      }
+    }
+
+    // Collect live gaps
+    const liveGaps = collectLiveGaps(procs, allUntestedProcs);
+
+    // Build param coverage matrix
+    const paramCoverage = buildParamCoverage(procs);
+
+    // Build base summary first, then extend with live data
+    const baseSummary = buildSqlCoverageSummary(sqlEntries, procs, hasRunData);
+
+    // Merge live gaps into static gaps
+    liveSummary = mergeLiveGaps(baseSummary, liveGaps);
+
+    // Add live introspection fields
+    liveSummary.dbTotalProcs = allUntestedProcs.length + procs.filter(p => p.inDatabase === true).length;
+    liveSummary.dbTestedProcs = procs.filter(p => p.inDatabase === true).length;
+    liveSummary.dbUntestedProcs = allUntestedProcs.length;
+    liveSummary.untestedProcs = allUntestedProcs;
+    liveSummary.paramCoverage = paramCoverage;
+    liveSummary.hasLiveData = true;
+  }
+
+  // 4. Build summary (use live summary if available, otherwise static)
+  const sqlSummary = liveSummary ?? buildSqlCoverageSummary(sqlEntries, procs, hasRunData);
 
   // 5. Render
   const format = args.format ?? 'pretty';

@@ -24,6 +24,53 @@ export interface SqlResultSet {
   rows: Record<string, unknown>[];
 }
 
+// ---------------------------------------------------------------------------
+// Introspection types (Phase 2 — live DB introspection)
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadata about a single parameter of a stored procedure, as discovered
+ * from the database catalog (e.g. sys.parameters in MSSQL).
+ */
+export interface SqlParamMetadata {
+  /** Parameter name (without @ prefix on MSSQL) */
+  name: string;
+  /** SQL data type name, e.g. "int", "nvarchar", "bit", "decimal" */
+  dataType: string;
+  /** Maximum length for string types (null for non-string types) */
+  maxLength?: number | null;
+  /** Precision for numeric types */
+  precision?: number | null;
+  /** Scale for numeric types */
+  scale?: number | null;
+  /** True if this is an OUTPUT parameter */
+  isOutput: boolean;
+  /** True if the parameter has a default value */
+  hasDefault: boolean;
+  /** The default value (string representation, if available) */
+  defaultValue?: string | null;
+  /** Ordinal position (1-based on MSSQL) */
+  ordinal: number;
+}
+
+/**
+ * Metadata about a stored procedure, as discovered from the database catalog.
+ */
+export interface SqlProcMetadata {
+  /** Schema name (e.g. "dbo") */
+  schema: string;
+  /** Procedure name (without schema prefix) */
+  name: string;
+  /** Fully-qualified name: "schema.name" */
+  qualifiedName: string;
+  /** Parameters in ordinal order */
+  parameters: SqlParamMetadata[];
+  /** Creation date (ISO string, if available) */
+  createDate?: string | null;
+  /** Last modified date (ISO string, if available) */
+  modifyDate?: string | null;
+}
+
 /**
  * Result of executing a stored procedure with one parameter set.
  */
@@ -83,6 +130,16 @@ export interface SqlDriver {
 
   /** Health check: verify driver dependencies are available */
   checkDependencies(): Promise<{ name: string; found: boolean; optional: boolean }[]>;
+
+  /**
+   * List all stored procedures in the database with their parameters.
+   * Used for live coverage introspection (Phase 2).
+   * Returns procs sorted by schema + name.
+   */
+  listProcedures(
+    connection: SqlConnectionConfig,
+    timeout: number,
+  ): Promise<SqlProcMetadata[]>;
 }
 
 // ---------------------------------------------------------------------------

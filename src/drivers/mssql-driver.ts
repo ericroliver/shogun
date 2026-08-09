@@ -133,6 +133,91 @@ export class MssqlDriver implements SqlDriver {
       return [{ name: 'mssql', found: false, optional: false }];
     }
   }
+
+  async listProcedures(
+    connection: SqlConnectionConfig,
+    timeout: number,
+  ): Promise<import('../sql-driver.js').SqlProcMetadata[]> {
+    const sql = await import('mssql');
+
+    const poolConfig = sql.ConnectionPool.parseConnectionString(connection.connectionString);
+    poolConfig.connectionTimeout = timeout * 1000;
+    poolConfig.requestTimeout = timeout * 1000;
+
+    const pool = new sql.ConnectionPool(poolConfig);
+    await pool.connect();
+
+    try {
+      // Query all stored procedures with their parameters in one go
+      // using sys.procedures + sys.parameters + sys.types catalog views
+      const request = pool.request();
+      const result = await request.query(`
+        SELECT
+          s.name  AS schema_name,
+          p.name  AS proc_name,
+          p.create_date,
+          p.modify_date,
+          prm.name AS param_name,
+          TYPE_NAME(prm.user_type_id) AS type_name,
+          prm.max_length,
+          prm.precision,
+          prm.scale,
+          prm.is_output,
+          prm.has_default_value,
+          CAST(prm.default_value AS NVARCHAR(MAX)) AS default_value,
+          prm.parameter_id AS ordinal
+        FROM sys.procedures p
+        JOIN sys.schemas s ON p.schema_id = s.schema_id
+        LEFT JOIN sys.parameters prm ON prm.object_id = p.object_id
+        LEFT JOIN sys.types t ON prm.user_type_id = t.user_type_id
+        ORDER BY s.name, p.name, prm.parameter_id
+      `);
+
+      // Group rows into procs + their parameters
+      const procMap = new Map<string, import('../sql-driver.js').SqlProcMetadata>();
+      const rows = ((result.recordsets as any) ?? [result.recordset ?? []])[0] as any[];
+
+      for (const row of rows) {
+        const schema = row.schema_name as string;
+        const name = row.proc_name as string;
+        const qualifiedName = `${schema}.${name}`;
+        const key = qualifiedName;
+
+        if (!procMap.has(key)) {
+          procMap.set(key, {
+            schema,
+            name,
+            qualifiedName,
+            parameters: [],
+            createDate: row.create_date ? new Date(row.create_date).toISOString() : null,
+            modifyDate: row.modify_date ? new Date(row.modify_date).toISOString() : null,
+          });
+        }
+
+        // Add parameter if this proc has parameters (param_name will be null for procs with 0 params)
+        if (row.param_name) {
+          procMap.get(key)!.parameters.push({
+            name: (row.param_name as string).replace(/^@/, ''),
+            dataType: row.type_name as string,
+            maxLength: row.max_length ?? null,
+            precision: row.precision ?? null,
+            scale: row.scale ?? null,
+            isOutput: Boolean(row.is_output),
+            hasDefault: Boolean(row.has_default_value),
+            defaultValue: row.default_value ?? null,
+            ordinal: row.ordinal as number,
+          });
+        }
+      }
+
+      return [...procMap.values()].sort((a, b) => {
+        if (a.schema !== b.schema) return a.schema.localeCompare(b.schema);
+        return a.name.localeCompare(b.name);
+      });
+    } finally {
+      await pool.close();
+    }
+  }
 }
 
 // Auto-register on import
