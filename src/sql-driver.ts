@@ -92,6 +92,31 @@ export interface SqlExecResult {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency types (Phase 3 — source + dependency introspection)
+// ---------------------------------------------------------------------------
+
+/**
+ * A database object that a stored procedure depends on (references).
+ * Used by `shogun sql --deps` to show the blast radius of a proc.
+ */
+export interface SqlDependency {
+  /** Schema of the referenced object */
+  schema: string;
+  /** Name of the referenced object */
+  name: string;
+  /** Fully-qualified name: "schema.name" */
+  qualifiedName: string;
+  /** Object type: TABLE, VIEW, PROCEDURE, FUNCTION, etc. */
+  type: string;
+  /** How the proc references this object: SELECT, INSERT, UPDATE, DELETE, EXECUTE, etc. */
+  referenceType: string;
+  /** True if the referenced object is in a different database */
+  isCrossDatabase: boolean;
+  /** True if the referenced object name could not be resolved (deferred name resolution) */
+  isUnresolved: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Driver interface
 // ---------------------------------------------------------------------------
 
@@ -140,6 +165,27 @@ export interface SqlDriver {
     connection: SqlConnectionConfig,
     timeout: number,
   ): Promise<SqlProcMetadata[]>;
+
+  /**
+   * Retrieve the source definition (body) of a stored procedure.
+   * On MSSQL: queries sys.sql_modules.definition.
+   * Returns null if the proc is not found.
+   */
+  getProcSource(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<string | null>;
+
+  /**
+   * Retrieve the objects a proc depends on (tables, views, other procs, etc.).
+   * On MSSQL: queries sys.sql_expression_dependencies.
+   */
+  getProcDependencies(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<SqlDependency[]>;
 }
 
 // ---------------------------------------------------------------------------

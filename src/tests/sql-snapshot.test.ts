@@ -30,6 +30,8 @@ describe('SqlDriverRegistry', () => {
       executeBatch: () => Promise.resolve([] as SqlExecResult[]),
       checkDependencies: () => Promise.resolve([]),
       listProcedures: () => Promise.resolve([]),
+      getProcSource: () => Promise.resolve(null),
+      getProcDependencies: () => Promise.resolve([]),
     };
     SqlDriverRegistry.register('mock-test', mockDriver);
     const retrieved = SqlDriverRegistry.get('mock-test');
