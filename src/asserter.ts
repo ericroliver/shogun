@@ -152,7 +152,7 @@ export function getExpectedPathFromTest(
 ): string {
   const expectedDir = join(cwd, config.paths?.expected ?? 'expected');
   const collection = collectionName ?? test.collection ?? 'default';
-  const safeName = sanitizeName(test.request.method, test.request.path);
+  const safeName = sanitizeName(test.request?.method ?? 'GET', test.request?.path ?? '/');
   return join(expectedDir, collection, `${safeName}.json`);
 }
 

@@ -11,7 +11,7 @@ import type { RunSummary, TestResult, AssertionResults, ShogunConfig } from './t
 
 export class RunLogger {
   private readonly runId: string;
-  private readonly runDir: string;
+  private readonly _runDir: string;
   private readonly results: TestResult[] = [];
   private readonly collectionNames: string[] = [];
   private startedAt: string;
@@ -21,15 +21,18 @@ export class RunLogger {
     this.startedAt = new Date().toISOString();
     this.runId = formatRunId(new Date());
     const runsBase = join(cwd, config.paths?.runs ?? 'runs');
-    this.runDir = join(runsBase, this.runId);
-    mkdirSync(this.runDir, { recursive: true });
+    this._runDir = join(runsBase, this.runId);
+    mkdirSync(this._runDir, { recursive: true });
   }
 
   get id(): string {
     return this.runId;
   }
 
-  /** Write a per-test log file and record the result. */
+  /** Returns the run directory path (for CSV artifacts etc.) */
+  get runDir(): string {
+    return this._runDir;
+  }
   recordTest(result: TestResult, collectionName: string): void {
     this.results.push(result);
     this.collectionNames.push(collectionName);
@@ -45,7 +48,7 @@ export class RunLogger {
     this.logSerial += 1;
     const serial = String(this.logSerial).padStart(4, '0');
     const logName = `${serial}_${collectionName}--${safeFileName(result.name)}.log`;
-    const logPath = join(this.runDir, logName);
+    const logPath = join(this._runDir, logName);
     writeFileSync(logPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
   }
 
@@ -81,12 +84,12 @@ export class RunLogger {
     };
 
     // run.json — full machine-readable detail
-    const jsonPath = join(this.runDir, 'run.json');
+    const jsonPath = join(this._runDir, 'run.json');
     writeFileSync(jsonPath, JSON.stringify(summary, null, 2) + '\n', 'utf8');
 
     // run.txt — human/agent-readable one-liner format
-    const txtPath = join(this.runDir, 'run.txt');
-    writeFileSync(txtPath, buildRunTxt(summary, this.collectionNames, this.runDir), 'utf8');
+    const txtPath = join(this._runDir, 'run.txt');
+    writeFileSync(txtPath, buildRunTxt(summary, this.collectionNames, this._runDir), 'utf8');
 
     return summary;
   }
