@@ -24,6 +24,7 @@ import type {
   ShapeAssertionResult,
   TestDefinition,
   ShogunConfig,
+  SseEvent,
 } from '../types.js';
 
 import type {
@@ -34,6 +35,8 @@ import type {
   DependencyCheck,
   AssertContext,
 } from '../backend-interface.js';
+
+import { parseSseResponse, isSseContentType, getAssertionBody } from '../sse.js';
 
 // ===========================================================================
 // Types
@@ -122,11 +125,22 @@ export function parsePowerShellResponse(output: string, duration: number): Shogu
   }
 
   let body: unknown = bodyRaw;
-  try {
-    if (bodyRaw.trim().startsWith('{') || bodyRaw.trim().startsWith('[')) {
-      body = JSON.parse(bodyRaw);
-    }
-  } catch { /* keep as string */ }
+  let events: SseEvent[] | undefined;
+
+  // SSE auto-parsing: when Content-Type is text/event-stream, parse the SSE
+  // events so that body/events are structured data instead of raw SSE text.
+  const ct = headers['content-type'] ?? '';
+  if (isSseContentType(ct)) {
+    const parsed = parseSseResponse(bodyRaw);
+    body = parsed.body;
+    events = parsed.events;
+  } else {
+    try {
+      if (bodyRaw.trim().startsWith('{') || bodyRaw.trim().startsWith('[')) {
+        body = JSON.parse(bodyRaw);
+      }
+    } catch { /* keep as string */ }
+  }
 
   return {
     status,
@@ -135,6 +149,7 @@ export function parsePowerShellResponse(output: string, duration: number): Shogu
     raw: bodyRaw,
     duration,
     curlMs: duration,
+    events,
   };
 }
 
@@ -178,9 +193,10 @@ export function buildPsHeaders(
   req: ShogunRequest,
   env: EnvVars,
   autoInjectAuth: boolean = true,
+  contentType: string = 'application/json',
 ): Record<string, string> {
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': contentType,
     'Accept': 'application/json',
     ...req.headers,
   };
@@ -316,7 +332,7 @@ export class PowerShellBackend implements BackendExecutor {
     const maxRedirs = opts.followRedirects === false ? 0 : 5;
     const url = buildPsUrl(req);
     const method = req.method.toUpperCase();
-    const headers = buildPsHeaders(req, env, opts.autoInjectAuth !== false);
+    const headers = buildPsHeaders(req, env, opts.autoInjectAuth !== false, opts.contentType);
     const bodyArg = buildBodyArg(req);
     const cookiesJson = JSON.stringify(this.cookies);
 
@@ -641,7 +657,7 @@ ${escapeHereString(actual)}
     const expectedPath = this.getExpectedPath(ctx);
 
     if (ctx.snapshotMode) {
-      await this.writeSnapshot(ctx.response.raw, ctx.test as TestDefinition, ctx.config as ShogunConfig, expectedPath);
+      await this.writeSnapshot(getAssertionBody(ctx.response), ctx.test as TestDefinition, ctx.config as ShogunConfig, expectedPath);
       return { passed: true };
     }
 
@@ -654,7 +670,7 @@ ${escapeHereString(actual)}
       ...((ctx.test as TestDefinition).response?.ignore_fields ?? []),
     ];
 
-    const normalizedActual = await this.normalizeJson(ctx.response.raw, ignoreFields);
+    const normalizedActual = await this.normalizeJson(getAssertionBody(ctx.response), ignoreFields);
     const expectedRaw = fs.readFileSync(expectedPath, 'utf8');
     const normalizedExpected = await this.normalizeJson(expectedRaw, ignoreFields);
 

@@ -24,9 +24,11 @@ import type {
   ShogunConfig,
   AssertionResults,
   ShapeAssertionResult,
+  SseEvent,
 } from '../types.js';
 import type { BackendExecutor, DependencyCheck } from '../backend-interface.js';
 import { sanitizeName } from '../loader.js';
+import { parseSseResponse, isSseContentType, getAssertionBody } from '../sse.js';
 
 // ===========================================================================
 // AssertContext — moved from asserter.ts (local type, reused here)
@@ -55,6 +57,12 @@ export interface ExecutorOptions {
    * Pass false to disable — auth must be wired explicitly in pre-scripts.
    */
   autoInjectAuth?: boolean;
+  /**
+   * Default Content-Type header for requests that don't specify one.
+   * Falls back to 'application/json' if not provided.
+   * Sourced from config.defaults.content_type.
+   */
+  contentType?: string;
 }
 
 /**
@@ -71,7 +79,7 @@ export async function executeRequest(
   const bodyOutFile = join(tmpdir(), `shogun-body-${tmpId}.tmp`);
 
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': opts.contentType ?? 'application/json',
     'Accept': 'application/json',
     ...req.headers,
   };
@@ -145,17 +153,28 @@ export async function executeRequest(
     }
 
     let body: unknown = raw;
-    try {
-      if (raw.trim().startsWith('{') || raw.trim().startsWith('[')) {
-        body = JSON.parse(raw);
-      }
-    } catch { /* non-JSON */ }
+    let events: SseEvent[] | undefined;
+
+    // SSE auto-parsing: when Content-Type is text/event-stream, parse the SSE
+    // events so that body/events are structured data instead of raw SSE text.
+    const ct = responseHeaders['content-type'] ?? '';
+    if (isSseContentType(ct)) {
+      const parsed = parseSseResponse(raw);
+      body = parsed.body;
+      events = parsed.events;
+    } else {
+      try {
+        if (raw.trim().startsWith('{') || raw.trim().startsWith('[')) {
+          body = JSON.parse(raw);
+        }
+      } catch { /* non-JSON */ }
+    }
 
     if (stderr && process.env.SHOGUN_DEBUG) {
       console.error(`[unix-backend] curl stderr: ${stderr}`);
     }
 
-    return { status, headers: responseHeaders, body, raw, duration, curlMs };
+    return { status, headers: responseHeaders, body, raw, duration, curlMs, events };
   } finally {
     cleanup(bodyOutFile);
     if (bodyInFile) cleanup(bodyInFile);
@@ -326,7 +345,7 @@ export async function runSnapshotAssertion(ctx: AssertContext): Promise<Snapshot
   const expectedPath = getExpectedPath(ctx);
 
   if (ctx.snapshotMode) {
-    await writeSnapshot(ctx.response.raw, ctx.test, ctx.config, expectedPath);
+    await writeSnapshot(getAssertionBody(ctx.response), ctx.test, ctx.config, expectedPath);
     return { passed: true };
   }
 
@@ -339,7 +358,7 @@ export async function runSnapshotAssertion(ctx: AssertContext): Promise<Snapshot
     ...(ctx.test.response?.ignore_fields ?? []),
   ];
 
-  const normalizedActual = await normalizeJson(ctx.response.raw, ignoreFields);
+  const normalizedActual = await normalizeJson(getAssertionBody(ctx.response), ignoreFields);
   const expectedRaw = readFileSync(expectedPath, 'utf8');
   const normalizedExpected = await normalizeJson(expectedRaw, ignoreFields);
 

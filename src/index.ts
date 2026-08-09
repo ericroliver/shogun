@@ -17,6 +17,7 @@ import { checkBackend } from './commands/check-backend.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
 import { initExecutor, checkDependencies } from './executor.js';
 import { init } from './commands/init.js';
+import { ls } from './commands/ls.js';
 // VERSION is a generated constant so it is always correct whether shogun is
 // run via tsx, via the compiled dist/, or as a standalone bun binary.
 // See scripts/gen-version.mjs — it is regenerated before every pkg:* build.
@@ -34,6 +35,16 @@ Usage:
   shogun init                         Scaffold a new test repo in the current directory
   shogun init <dir>                   Scaffold into a new subdirectory
   shogun init --force                 Overwrite existing files
+
+  shogun ls                           List everything (envs, collections, suites, tests, runs)
+  shogun ls envs                      List environment files only
+  shogun ls collections               List collections only
+  shogun ls suites                    List suites only
+  shogun ls tests                     List all test files across collections
+  shogun ls tests --collection agents List tests in a specific collection
+  shogun ls runs                      List recent runs
+  shogun ls fixtures                  List setup fixtures
+  shogun ls --format json             JSON output (for scripting)
 
   shogun run                          Run all tests (default env)
   shogun run --env QA                 Select environment
@@ -274,6 +285,18 @@ async function main() {
   switch (subcommand) {
     case 'init': {
       const exitCode = await init({ dir: args.initDir, force: args.force });
+      process.exit(exitCode);
+      break;
+    }
+    case 'ls': {
+      // The first positional arg is the target (envs, collections, etc.)
+      // parseArgs stores it in specSource/initDir — we extract it here.
+      const target = args.specSource;
+      const exitCode = await ls({
+        target,
+        collection: typeof args.collection === 'string' ? args.collection : undefined,
+        format: args.format as 'pretty' | 'json' | undefined,
+      });
       process.exit(exitCode);
       break;
     }

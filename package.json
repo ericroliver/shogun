@@ -1,5 +1,7 @@
 {
   "name": "shogun",
+
+
   "version": "0.5.5-beta",
   "description": "Shell-first, TypeScript-enhanced API testing system",
   "type": "module",

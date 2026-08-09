@@ -285,6 +285,7 @@ async function ensureCollectionSetup(
           vars: opts.vars,
           request: dummyRequest,
           scriptsDir: opts.scriptsDir,
+          defaultContentType: opts.config.defaults?.content_type,
         });
         applyVarMutations(opts.vars, result.varMutations);
         if (!result.passed) {
@@ -311,6 +312,7 @@ async function ensureCollectionSetup(
         vars: opts.vars,
         request: dummyRequest,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       if (process.env.SHOGUN_DEBUG) {
         process.stderr.write(`[runner] collection setup result: passed=${result.passed}, error=${result.error ?? 'none'}, varMutations=${JSON.stringify(result.varMutations ?? {}).slice(0, 300)}\n`);
@@ -348,6 +350,7 @@ async function ensureCollectionTeardown(
       vars: opts.vars,
       request: dummyRequest,
       scriptsDir: opts.scriptsDir,
+      defaultContentType: opts.config.defaults?.content_type,
     });
     if (!result.passed) {
       console.warn(`  ${c.yellow}Teardown warning (${collectionName}): ${result.error}${c.reset}`);
@@ -489,6 +492,7 @@ async function runSingleTest(
         vars: opts.vars,
         request,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       preMs = Date.now() - preStart;
       if (process.env.SHOGUN_DEBUG) {
@@ -519,6 +523,7 @@ async function runSingleTest(
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
+      contentType: opts.config.defaults?.content_type,
     });
     if (process.env.SHOGUN_DEBUG) {
       process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
@@ -557,6 +562,7 @@ async function runSingleTest(
         request,
         response,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       postMs = Date.now() - postStart;
       scriptOutput.push(...postResult.logs);
