@@ -19,6 +19,8 @@ import type {
   CoverageConfig,
   CoverageRiskWeights,
   CoverageMinThresholds,
+  SqlConnectionConfig,
+  SqlTestConfig,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,13 @@ const ShogunConfigSchema = z.object({
   spec: z.object({
     path: z.string().min(1),
   }).optional(),
+  connections: z.record(
+    z.object({
+      driver: z.enum(['mssql', 'postgres', 'sqlite']),
+      connectionString: z.string().min(1),
+      timeout: z.number().optional(),
+    })
+  ).optional(),
   coverage: CoverageConfigSchema.optional(),
 });
 
@@ -231,20 +240,45 @@ const ResponseDefSchema = z.object({
   snapshot: z.boolean().optional(),
   ignore_fields: z.array(z.string()).optional(),
   shape: z.array(z.string()).optional(),
+  diff_mode: z.enum(['strict', 'relaxed']).optional(),
+}).optional();
+
+// SQL test configuration schema
+const SqlTestConfigSchema = z.object({
+  connection: z.string().min(1, 'sql.connection is required'),
+  proc: z.string().min(1, 'sql.proc is required'),
+  parameters: z.union([
+    z.object({
+      inline: z.array(z.record(z.unknown())),
+    }),
+    z.object({
+      file: z.string().min(1, 'sql.parameters.file is required'),
+    }),
+  ]),
+  outputFormat: z.enum(['json', 'csv', 'both']).optional(),
+  timeout: z.number().optional(),
+  pre: z.string().optional(),
+  post: z.string().optional(),
 }).optional();
 
 const TestDefinitionSchema = z.object({
   name: z.string().min(1, 'name is required'),
+  type: z.enum(['http', 'sql']).optional(),
   description: z.string().optional(),
   collection: z.string().optional(),
   tags: z.array(z.string()).optional(),
   dependsOn: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
   pre: z.string().optional(),
-  request: RequestDefSchema,
+  request: RequestDefSchema.optional(),
   response: ResponseDefSchema,
   post: z.string().optional(),
-});
+  sql: SqlTestConfigSchema,
+}).refine(
+  // request is required when type is 'http' or undefined
+  (data) => (data.type === 'sql') || (data.request !== undefined),
+  { message: 'request is required for HTTP tests (type is http or omitted)' },
+);
 
 // ---------------------------------------------------------------------------
 // Test definition loader
@@ -591,6 +625,75 @@ export function interpolateEnv(text: string, env: EnvVars): string {
   return text.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key) => {
     return env[key] ?? process.env[key] ?? `\${${key}}`;
   });
+}
+
+// ---------------------------------------------------------------------------
+// SQL connection resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a named connection from the config, interpolating ${VAR} tokens
+ * in the connection string from env vars.
+ */
+export function resolveSqlConnection(
+  connectionName: string,
+  config: ShogunConfig,
+  env: EnvVars,
+): SqlConnectionConfig | null {
+  const connections = config.connections;
+  if (!connections || !connections[connectionName]) {
+    return null;
+  }
+
+  const conn = connections[connectionName];
+  return {
+    driver: conn.driver,
+    connectionString: interpolateEnv(conn.connectionString, env),
+    timeout: conn.timeout,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SQL parameter file loader
+// ---------------------------------------------------------------------------
+
+/**
+ * Load parameter sets from either inline array or external file.
+ * Parameter files are relative to the test YAML file location.
+ */
+export function loadSqlParameters(
+  parameters: { inline: Record<string, unknown>[] } | { file: string },
+  testFilePath: string,
+  env: EnvVars,
+): Record<string, unknown>[] {
+  if ('inline' in parameters) {
+    return parameters.inline;
+  }
+
+  // File-based parameters — resolve relative to the test YAML file
+  const testDir = dirname(resolve(testFilePath));
+  const paramPath = resolve(testDir, parameters.file);
+
+  if (!existsSync(paramPath)) {
+    throw new Error(
+      `SQL parameter file not found: ${paramPath}\n` +
+      `  Referenced from: ${testFilePath}\n` +
+      `  Resolved from: ${parameters.file}`
+    );
+  }
+
+  const raw = readFileSync(paramPath, 'utf8');
+  const interpolated = interpolateEnv(raw, env);
+  const parsed = yaml.load(interpolated) as Record<string, unknown>;
+
+  if (!parsed || !Array.isArray(parsed.parameters)) {
+    throw new Error(
+      `Invalid parameter file ${paramPath}:\n` +
+      `  Expected a YAML object with a "parameters" key containing an array.`
+    );
+  }
+
+  return parsed.parameters as Record<string, unknown>[];
 }
 
 function formatZodError(err: z.ZodError): string {

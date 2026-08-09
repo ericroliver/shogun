@@ -14,6 +14,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
+  resolveSqlConnection, loadSqlParameters,
 } from './loader.js';
 import { executeRequest, checkDependencies } from './executor.js';
 import { runAssertions, assertionsAllPassed, writeSnapshot } from './asserter.js';
@@ -21,10 +22,17 @@ import { runScript } from './scripter.js';
 import { RunLogger } from './logger.js';
 import {
   printCollectionHeader, printTestStart, printTestResult, printSummary,
+  printSqlTestDetails,
 } from './reporter.js';
+import { SqlDriverRegistry } from './sql-driver.js';
+import type { SqlExecResult, SqlDriver } from './sql-driver.js';
+import {
+  getSqlBaselinePath, writeSqlBaseline, diffSqlBaseline, writeCsvArtifacts,
+} from './sql-snapshot.js';
 import type {
   ShogunRequest, ShogunResponse, TestResult, TestTimings, EnvVars,
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
+  TestDefinition, SqlConnectionConfig, SqlScriptContext,
 } from './types.js';
 
 export interface RunOptions {
@@ -84,6 +92,9 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   if (opts.file) {
     const result = await runSingleFile(opts.file, sharedOpts);
     logger.recordTest(result, 'file');
+    if (result.sqlExecSummary) {
+      printSqlTestDetails(result);
+    }
     const summary = logger.finalize({ env: envName, startedAt });
     printSummary(summary);
     return summary;
@@ -141,7 +152,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
           error: `Collection setup failed for "${collectionName}"`,
         };
         logger.recordTest(failed, collectionName);
-        printTestStart(test.name, test.request.method, test.request.path);
+        const display = getTestDisplayInfo(test);
+        printTestStart(test.name, display.method, display.path);
         printTestResult(failed);
       }
       continue;
@@ -156,7 +168,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
         continue;
       }
 
-      printTestStart(test.name, test.request.method, test.request.path);
+      const display = getTestDisplayInfo(test);
+      printTestStart(test.name, display.method, display.path);
 
       // Resolve the canonical ID from the actual file path — handles cross-collection
       // refs stored in _failures_ / _debug_ collections where collectionName is the
@@ -199,9 +212,10 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
 
       logger.recordTest(result, collectionName);
       printTestResult(result);
+      if (result.sqlExecSummary) {
+        printSqlTestDetails(result);
+      }
     }
-
-    // Run collection teardown (even on failures), deduped by session
     await ensureCollectionTeardown(collectionName, definition, sharedOpts);
   }
 
@@ -421,7 +435,8 @@ async function resolveDependencies(
 
     // Execute the dependency test
     const depTest = loadTestFile(depFile, opts.env);
-    printTestStart(depTest.name, depTest.request.method, depTest.request.path);
+    const depDisplay = getTestDisplayInfo(depTest);
+    printTestStart(depTest.name, depDisplay.method, depDisplay.path);
 
     const depResult = await runSingleTest(depTest, depFile, {
       ...opts,
@@ -431,6 +446,9 @@ async function resolveDependencies(
 
     opts.logger.recordTest(depResult, depCollection);
     printTestResult(depResult);
+    if (depResult.sqlExecSummary) {
+      printSqlTestDetails(depResult);
+    }
 
     const outcome = depResult.status === 'passed' ? 'passed' : 'failed';
     opts.session.testsRun.set(depId, outcome);
@@ -451,32 +469,51 @@ interface SingleTestOpts extends SharedRunOpts {
   collectionName?: string;
 }
 
+/**
+ * Dispatcher: routes to runHttpTest or runSqlTest based on test type.
+ * If type is absent or 'http', the existing HTTP path runs unchanged.
+ */
 async function runSingleTest(
-  test: {
-    name: string;
-    request: { method: string; path: string };
-    pre?: string;
-    post?: string;
-    response?: unknown;
-    tags?: string[];
-    collection?: string;
-    env?: EnvVars;
-    description?: string;
-  },
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const testType = test.type ?? 'http';
+
+  if (testType === 'sql' && test.sql) {
+    return runSqlTest(test, file, opts);
+  }
+
+  // Existing HTTP path — unchanged
+  return runHttpTest(test, file, opts);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP test execution (existing behavior — unchanged, just renamed)
+// ---------------------------------------------------------------------------
+
+async function runHttpTest(
+  test: TestDefinition,
   file: string,
   opts: SingleTestOpts,
 ): Promise<TestResult> {
   const scriptOutput: string[] = [];
   const startMs = Date.now();
 
+  // Guard: request must be present for HTTP tests (Zod enforces this too)
+  if (!test.request) {
+    return makeFailedResult(test.name, file, startMs, {}, 'request is required for HTTP tests', scriptOutput);
+  }
+
   // Build initial request
+  const req = test.request;
   let request: ShogunRequest = {
-    method: test.request.method,
-    path: test.request.path,
-    url: buildUrl(opts.baseUrl, test.request.path),
-    headers: (test.request as { headers?: Record<string, string> }).headers ?? {},
-    params: normalizeParams((test.request as { params?: Record<string, string | number | boolean> }).params ?? {}),
-    body: (test.request as { body?: unknown }).body,
+    method: req.method,
+    path: req.path,
+    url: buildUrl(opts.baseUrl, req.path),
+    headers: (req as { headers?: Record<string, string> }).headers ?? {},
+    params: normalizeParams((req as { params?: Record<string, string | number | boolean> }).params ?? {}),
+    body: (req as { body?: unknown }).body,
   };
 
   // Pre-script
@@ -606,6 +643,215 @@ async function runSingleTest(
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
     // Attach full request + response on failures so the reporter can dump diagnostics
     ...(finalStatus === 'failed' ? { resolvedRequest: request, resolvedResponse: response } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SQL test execution
+// ---------------------------------------------------------------------------
+
+async function runSqlTest(
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const startMs = Date.now();
+  const scriptOutput: string[] = [];
+  const sql = test.sql!;
+
+  // 1. Resolve connection config
+  const connConfig = resolveSqlConnection(sql.connection, opts.config, opts.env);
+  if (!connConfig) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `Connection "${sql.connection}" not found in config.connections`, scriptOutput);
+  }
+
+  // 2. Resolve driver (import mssql driver to register it, then look up)
+  try {
+    await import('./drivers/mssql-driver.js');
+  } catch {
+    // mssql package not installed — will fail at driver lookup with clear error
+  }
+
+  let driver: SqlDriver;
+  try {
+    driver = SqlDriverRegistry.get(connConfig.driver);
+  } catch (err) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `Driver error: ${err}`, scriptOutput);
+  }
+
+  // 3. Load parameter sets
+  let paramSets: Record<string, unknown>[];
+  try {
+    paramSets = loadSqlParameters(sql.parameters, file, opts.env);
+  } catch (err) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `Parameter loading failed: ${err}`, scriptOutput);
+  }
+
+  if (paramSets.length === 0) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `No parameter sets found`, scriptOutput);
+  }
+
+  // 4. Run pre-script (optional — has ctx.sql with paramCount, params, proc, connection)
+  if (sql.pre) {
+    const dummyRequest = makeDummyRequest(opts.baseUrl);
+    const sqlContext: SqlScriptContext = {
+      paramCount: paramSets.length,
+      params: paramSets,
+      proc: sql.proc,
+      connection: sql.connection,
+    };
+    try {
+      const preResult = await runScript(sql.pre, {
+        env: opts.env,
+        vars: opts.vars,
+        request: dummyRequest,
+        scriptsDir: opts.scriptsDir,
+        sqlContext,
+        defaultContentType: opts.config.defaults?.content_type,
+      });
+      scriptOutput.push(...preResult.logs);
+      if (!preResult.passed) {
+        return makeFailedResult(test.name, file, startMs, {},
+          `SQL pre-script failed: ${preResult.error}`, scriptOutput);
+      }
+      applyVarMutations(opts.vars, preResult.varMutations);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `SQL pre-script threw: ${err}`, scriptOutput);
+    }
+  }
+
+  // 5. Execute proc for each parameter set
+  const timeout = sql.timeout ?? connConfig.timeout ?? opts.config.defaults?.timeout ?? 30;
+  let results: SqlExecResult[];
+  try {
+    results = await driver.executeBatch(connConfig, sql.proc, paramSets, timeout);
+  } catch (err) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `SQL execution failed: ${err}`, scriptOutput);
+  }
+
+  // 6. Check for execution errors
+  const execErrors = results.filter(r => r.error);
+  if (execErrors.length > 0) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `${execErrors.length} of ${results.length} parameter sets failed to execute: ${execErrors[0].error}`, scriptOutput);
+  }
+
+  // 7. Snapshot capture/diff
+  const baselinePath = getSqlBaselinePath(sql.proc, opts.config, opts.cwd, opts.collectionName);
+  const ignoreFields = [
+    ...(opts.config.ignore_fields_global ?? []),
+    ...(test.response?.ignore_fields ?? []),
+  ];
+  const diffMode = test.response?.diff_mode ?? 'strict';
+
+  if (opts.snapshotMode) {
+    await writeSqlBaseline(results, baselinePath, ignoreFields);
+    return {
+      name: test.name,
+      file,
+      status: 'passed',
+      durationMs: Date.now() - startMs,
+      assertions: { snapshot: true },
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    };
+  }
+
+  const snapshotResult = diffSqlBaseline(results, baselinePath, ignoreFields, diffMode);
+  if (snapshotResult.needsBaseline) {
+    return {
+      name: test.name,
+      file,
+      status: 'needs_baseline',
+      durationMs: Date.now() - startMs,
+      assertions: {},
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    };
+  }
+
+  // 8. Write CSV artifacts (if requested)
+  if (sql.outputFormat === 'csv' || sql.outputFormat === 'both') {
+    const runDir = opts.logger.runDir;
+    if (runDir) {
+      writeCsvArtifacts(results, runDir, opts.collectionName ?? 'default', sql.proc);
+    }
+  }
+
+  // 9. Run post-script (optional — has ctx.sql with results)
+  if (sql.post) {
+    const dummyRequest = makeDummyRequest(opts.baseUrl);
+    const sqlContext: SqlScriptContext = {
+      paramCount: paramSets.length,
+      params: paramSets,
+      results,
+      proc: sql.proc,
+      connection: sql.connection,
+    };
+    try {
+      const postResult = await runScript(sql.post, {
+        env: opts.env,
+        vars: opts.vars,
+        request: dummyRequest,
+        scriptsDir: opts.scriptsDir,
+        sqlContext,
+        defaultContentType: opts.config.defaults?.content_type,
+      });
+      scriptOutput.push(...postResult.logs);
+      applyVarMutations(opts.vars, postResult.varMutations);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `SQL post-script threw: ${err}`, scriptOutput);
+    }
+  }
+
+  // 10. Return result — one TestResult per SQL test
+  const durationMs = Date.now() - startMs;
+  const passed = snapshotResult.passed;
+  const totalRows = results.reduce((sum, r) =>
+    sum + r.resultSets.reduce((s, rs) => s + rs.rows.length, 0), 0);
+
+  return {
+    name: test.name,
+    file,
+    status: passed ? 'passed' : 'failed',
+    durationMs,
+    assertions: {
+      snapshot: passed,
+      snapshotDiff: snapshotResult.diff ?? null,
+    },
+    scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    // On failure, attach SQL exec summary for diagnostics
+    ...(passed ? {} : {
+      sqlExecSummary: {
+        totalParams: results.length,
+        executed: results.length,
+        errors: execErrors.length,
+        totalRows,
+      },
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test display helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the method and path to display for a test, handling SQL tests
+ * which don't have a `request` field.
+ */
+function getTestDisplayInfo(test: TestDefinition): { method: string; path: string } {
+  if (test.type === 'sql' && test.sql) {
+    return { method: 'SQL', path: test.sql.proc };
+  }
+  return {
+    method: test.request?.method ?? 'GET',
+    path: test.request?.path ?? '/',
   };
 }
 

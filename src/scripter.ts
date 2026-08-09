@@ -25,6 +25,7 @@ import type {
   ShogunRequest,
   ShogunResponse,
   EnvVars,
+  SqlScriptContext,
 } from './types.js';
 
 export interface ScriptRunResult {
@@ -87,6 +88,8 @@ export interface ScriptContext {
    * Sourced from config.defaults.content_type.
    */
   defaultContentType?: string;
+  /** SQL test context — only populated for type: sql tests */
+  sqlContext?: SqlScriptContext;
 }
 
 /** Plain-data representation of the context, safe for JSON serialization. */
@@ -96,6 +99,7 @@ export interface SerializedContext {
   request: ShogunRequest;
   response: ShogunResponse | null;
   defaultContentType?: string;
+  sqlContext?: SqlScriptContext;
 }
 
 /**
@@ -109,6 +113,7 @@ export function serializeContext(ctx: ScriptContext): SerializedContext {
     request: ctx.request,
     response: ctx.response ?? null,
     defaultContentType: ctx.defaultContentType,
+    sqlContext: ctx.sqlContext,
   };
 }
 
@@ -218,6 +223,7 @@ const ctx = {
   vars: __ctxData.vars as Record<string, unknown>,
   request: __ctxData.request as Record<string, unknown>,
   response: __ctxData.response as Record<string, unknown> | null,
+  sql: __ctxData.sqlContext as Record<string, unknown> | undefined,
   scripts: { ${scriptNames} },
 
   assert(condition: boolean, message: string): void {
@@ -395,6 +401,7 @@ var ctx = {
   vars: __ctxData.vars,
   request: __ctxData.request,
   response: __ctxData.response,
+  sql: __ctxData.sqlContext,
   scripts: { ${scriptNames} },
 
   assert: function(condition, message) {

@@ -836,7 +836,7 @@ ${escapeHereString(actual)}
     const loader = require('../loader.js');
     const expectedDir = path.join(cwd, config.paths?.expected ?? 'expected');
     const collection = collectionName ?? test.collection ?? 'default';
-    const safeName = loader.sanitizeName(test.request.method, test.request.path);
+    const safeName = loader.sanitizeName(test.request?.method ?? 'GET', test.request?.path ?? '/');
     return path.join(expectedDir, collection, `${safeName}.json`);
   }
 }
