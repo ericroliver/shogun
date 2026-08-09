@@ -44,6 +44,8 @@ export interface CoverageArgs {
   top?: number;
   /** --suppress-drift <code,code>: hide spec-drift entries for these status codes */
   suppressDrift?: string[];
+  /** --sql: show SQL stored procedure coverage report instead of HTTP endpoint coverage */
+  sql?: boolean;
   /** cwd override */
   cwd?: string;
 }
@@ -413,6 +415,105 @@ export interface CoverageSummary {
   onlyHappyPathCount: number;                // endpoints with only 2xx tests
   specDriftCount: number;                    // total drift entries (0 if no run data)
   mcpCoverage?: McpCoverageReport | null;    // MCP / JSON-RPC coverage (null if no MCP tests)
+  sqlCoverage?: SqlCoverageSummary | null;   // SQL proc coverage (null if no SQL tests)
+}
+
+// ---------------------------------------------------------------------------
+// SQL stored procedure coverage (Phase 1 — static analysis)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-test metadata extracted from a `type: sql` test YAML.
+ */
+export interface SqlTestEntry {
+  name: string;
+  file: string;                   // relative path from cwd
+  collection: string;
+  proc: string;
+  connection: string;
+  driver?: string;                // from config.connections[connection].driver
+  paramSetCount: number;          // number of parameter sets (inline count or file entries)
+  paramKeys: string[];            // unique parameter names across all sets
+  baselineExists: boolean;        // does the baseline JSON file exist on disk?
+  baselinePath: string;           // relative path to baseline
+  hasPreScript: boolean;
+  hasPostScript: boolean;
+  ignoreFields: string[];         // response.ignore_fields
+  diffMode: 'strict' | 'relaxed';
+  outputFormat: 'json' | 'csv' | 'both';
+  timeout?: number;
+  tags: string[];
+  // Run result (populated only with --last-run)
+  runResult?: SqlTestRunResult;
+}
+
+/**
+ * Run result for a single SQL test (joined from run.json).
+ */
+export interface SqlTestRunResult {
+  status: 'passed' | 'failed' | 'needs_baseline' | 'dependency_failed';
+  durationMs: number;
+  paramCount: number;
+  executed: number;
+  errors: number;
+  totalRows: number;
+  snapshotDiff?: string;
+}
+
+/**
+ * Aggregated coverage for a single stored procedure (grouped by proc + connection).
+ */
+export interface SqlProcCoverage {
+  /** "proc_name" (connection is tracked separately) */
+  proc: string;
+  connection: string;
+  driver?: string;
+  tests: SqlTestEntry[];
+  testCount: number;
+  paramSetCount: number;          // total across all tests
+  paramKeys: string[];            // union of all param keys
+  baselineExists: boolean;        // any test has a baseline file on disk
+  hasPreScript: boolean;
+  hasPostScript: boolean;
+  collections: string[];          // distinct collections covering this proc
+  // Run results (populated with --last-run)
+  runStatus?: 'passed' | 'failed' | 'mixed' | 'needs_baseline';
+  passCount: number;
+  failCount: number;
+  needsBaselineCount: number;
+}
+
+/**
+ * Summary statistics for SQL coverage.
+ */
+export interface SqlCoverageSummary {
+  totalProcs: number;             // distinct proc+connection pairs
+  totalTests: number;
+  totalParamSets: number;
+  baselinedProcs: number;         // procs with at least one baseline
+  needsBaselineCount: number;     // procs with no baseline at all
+  preScriptCount: number;         // tests with pre scripts
+  postScriptCount: number;        // tests with post scripts
+  connectionsUsed: string[];      // distinct connection names
+  driverCounts: Record<string, number>;  // driver → proc count
+  // Run result stats (populated with --last-run)
+  passedTests: number;
+  failedTests: number;
+  needsBaselineTests: number;
+  hasRunData: boolean;
+  // Gaps
+  gaps: SqlCoverageGap[];
+}
+
+/**
+ * A single SQL coverage gap.
+ */
+export interface SqlCoverageGap {
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  category: string;               // human-readable category
+  proc: string;                   // proc name
+  detail: string;                 // specific gap description
+  file?: string;                  // test file path
 }
 
 // ---------------------------------------------------------------------------
