@@ -95,7 +95,8 @@ Usage:
   shogun coverage --suppress-drift 401  Hide drift for these codes (default: 401)
   shogun coverage --compare           Compare two runs and show delta
   shogun coverage --deps              Show test dependency graph
-  shogun coverage --sql               SQL stored procedure coverage report
+  shogun coverage --sql               SQL stored procedure coverage report (static)
+  shogun coverage --sql --live         SQL coverage with live DB introspection
   shogun coverage --min-coverage 80   CI gate: fail if endpoint coverage < 80%
   shogun coverage --format json       JSON output (for scripting)
   shogun coverage --format markdown   Markdown table output (for PRs/docs)
@@ -138,6 +139,7 @@ interface ParsedArgs {
   top?: number;              // --top N: limit --gaps to N highest-priority gaps
   suppressDrift?: string[];  // --suppress-drift <code,code>: hide drift for these codes
   sql?: boolean;             // --sql: SQL stored procedure coverage mode
+  live?: boolean;             // --live: live DB introspection (requires --sql)
   // init-specific
   initDir?: string;
   force?: boolean;
@@ -191,6 +193,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       case '--deps':       result.deps = true; break;
       case '--sql':        result.sql = true; break;
+      case '--live':       result.live = true; break;
       case '--compare': {
         result.compare = true;
         // Check for two positional run IDs after --compare
@@ -365,6 +368,7 @@ async function main() {
         top: args.top,
         suppressDrift: args.suppressDrift,
         sql: args.sql,
+        live: args.live,
         cwd: args.cwd,
       });
       process.exit(exitCode);

@@ -46,6 +46,8 @@ export interface CoverageArgs {
   suppressDrift?: string[];
   /** --sql: show SQL stored procedure coverage report instead of HTTP endpoint coverage */
   sql?: boolean;
+  /** --live: connect to databases for live introspection (requires --sql) */
+  live?: boolean;
   /** cwd override */
   cwd?: string;
 }
@@ -481,11 +483,56 @@ export interface SqlProcCoverage {
   passCount: number;
   failCount: number;
   needsBaselineCount: number;
+
+  // --- Phase 2: Live DB introspection fields ---
+  /** Database metadata for this proc (populated only with --live) */
+  dbMetadata?: import('../../sql-driver.js').SqlProcMetadata;
+  /** True if proc was found in the database (populated only with --live) */
+  inDatabase?: boolean;
+  /** Input parameters from DB that are exercised by at least one param set */
+  exercisedParams?: string[];
+  /** Input parameters from DB that are never exercised by any param set */
+  untestedParams?: string[];
+  /** Parameters in test YAML that don't exist in the DB proc definition */
+  phantomParams?: string[];
 }
 
 /**
- * Summary statistics for SQL coverage.
+ * A stored procedure that exists in the database but has no test files.
+ * (Phase 2 — live introspection only)
  */
+export interface SqlUntestedProc {
+  schema: string;
+  name: string;
+  qualifiedName: string;
+  connection: string;
+  parameters: import('../../sql-driver.js').SqlParamMetadata[];
+  createDate?: string | null;
+  modifyDate?: string | null;
+}
+
+/**
+ * Parameter coverage row for a single parameter of a tested proc.
+ * (Phase 2 — live introspection only)
+ */
+export interface SqlParamCoverageRow {
+  /** Parameter name (without @ prefix) */
+  name: string;
+  /** DB data type */
+  dataType: string;
+  /** Is this an OUTPUT parameter? */
+  isOutput: boolean;
+  /** Has a default value in the DB definition? */
+  hasDefault: boolean;
+  /** Number of parameter sets that include this parameter */
+  exercisedCount: number;
+  /** Total parameter sets across all tests for this proc */
+  totalParamSets: number;
+  /** True if every param set includes this parameter */
+  fullyCovered: boolean;
+  /** True if no param set includes this parameter */
+  neverExercised: boolean;
+}
 export interface SqlCoverageSummary {
   totalProcs: number;             // distinct proc+connection pairs
   totalTests: number;
@@ -503,6 +550,20 @@ export interface SqlCoverageSummary {
   hasRunData: boolean;
   // Gaps
   gaps: SqlCoverageGap[];
+
+  // --- Phase 2: Live DB introspection fields (null when --live not used) ---
+  /** Total stored procedures discovered in the database */
+  dbTotalProcs?: number | null;
+  /** Procs in DB that have tests */
+  dbTestedProcs?: number | null;
+  /** Procs in DB with no test files at all */
+  dbUntestedProcs?: number | null;
+  /** List of untested procs (exists in DB, no tests) */
+  untestedProcs?: SqlUntestedProc[] | null;
+  /** Per-proc parameter coverage (input params exercised vs. total) */
+  paramCoverage?: Array<{ proc: string; connection: string; params: SqlParamCoverageRow[] }> | null;
+  /** True if live introspection was performed */
+  hasLiveData?: boolean;
 }
 
 /**

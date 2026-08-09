@@ -271,3 +271,26 @@ export function buildSqlCoverageSummary(
     gaps,
   };
 }
+
+/**
+ * Merge live introspection gaps into an existing SqlCoverageSummary.
+ * Called only when --live flag is used.
+ */
+export function mergeLiveGaps(
+  summary: SqlCoverageSummary,
+  liveGaps: SqlCoverageGap[],
+): SqlCoverageSummary {
+  // Merge and re-sort all gaps by severity
+  const allGaps = [...summary.gaps, ...liveGaps];
+  const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  allGaps.sort((a, b) => {
+    const orderDiff = severityOrder[a.severity]! - severityOrder[b.severity]!;
+    if (orderDiff !== 0) return orderDiff;
+    return a.proc.localeCompare(b.proc);
+  });
+
+  return {
+    ...summary,
+    gaps: allGaps,
+  };
+}

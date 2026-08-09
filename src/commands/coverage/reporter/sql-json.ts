@@ -32,6 +32,12 @@ export function renderSqlJson(
       passCount: proc.passCount,
       failCount: proc.failCount,
       needsBaselineCount: proc.needsBaselineCount,
+      // Phase 2: live introspection fields
+      inDatabase: proc.inDatabase ?? null,
+      dbMetadata: proc.dbMetadata ?? null,
+      exercisedParams: proc.exercisedParams ?? null,
+      untestedParams: proc.untestedParams ?? null,
+      phantomParams: proc.phantomParams ?? null,
       tests: proc.tests.map(t => ({
         name: t.name,
         file: t.file,
@@ -50,6 +56,27 @@ export function renderSqlJson(
         runResult: t.runResult ?? null,
       })),
     })),
+    // Phase 2: live introspection data (null when --live not used)
+    liveCoverage: summary.hasLiveData ? {
+      dbTotalProcs: summary.dbTotalProcs,
+      dbTestedProcs: summary.dbTestedProcs,
+      dbUntestedProcs: summary.dbUntestedProcs,
+      untestedProcs: summary.untestedProcs?.map(p => ({
+        schema: p.schema,
+        name: p.name,
+        qualifiedName: p.qualifiedName,
+        connection: p.connection,
+        parameters: p.parameters.map(param => ({
+          name: param.name,
+          dataType: param.dataType,
+          isOutput: param.isOutput,
+          hasDefault: param.hasDefault,
+        })),
+        createDate: p.createDate,
+        modifyDate: p.modifyDate,
+      })) ?? [],
+      paramCoverage: summary.paramCoverage ?? [],
+    } : null,
   };
 
   return JSON.stringify(output, null, 2);
