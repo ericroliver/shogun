@@ -28,6 +28,8 @@ describe('SqlDriverRegistry', () => {
       name: 'mock-test-driver',
       executeProc: () => Promise.resolve({} as SqlExecResult),
       executeBatch: () => Promise.resolve([] as SqlExecResult[]),
+      executeQuery: () => Promise.resolve({} as SqlExecResult),
+      executeQueryBatch: () => Promise.resolve([] as SqlExecResult[]),
       checkDependencies: () => Promise.resolve([]),
       listProcedures: () => Promise.resolve([]),
       getProcSource: () => Promise.resolve(null),

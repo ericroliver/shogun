@@ -153,6 +153,29 @@ export interface SqlDriver {
     timeout: number,
   ): Promise<SqlExecResult[]>;
 
+  /**
+   * Execute a raw SQL query with the given parameters.
+   * Parameters are bound as @paramName in the query string.
+   * Opens a connection, executes, captures results, closes connection.
+   */
+  executeQuery(
+    connection: SqlConnectionConfig,
+    query: string,
+    params: Record<string, unknown>,
+    timeout: number,
+  ): Promise<SqlExecResult>;
+
+  /**
+   * Execute a raw SQL query across N parameter sets using a shared connection pool.
+   * Each result's paramIndex is set to its position in the array.
+   */
+  executeQueryBatch(
+    connection: SqlConnectionConfig,
+    query: string,
+    paramSets: Record<string, unknown>[],
+    timeout: number,
+  ): Promise<SqlExecResult[]>;
+
   /** Health check: verify driver dependencies are available */
   checkDependencies(): Promise<{ name: string; found: boolean; optional: boolean }[]>;
 

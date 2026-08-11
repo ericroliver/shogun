@@ -55,6 +55,44 @@ export class MssqlDriver implements SqlDriver {
     return results;
   }
 
+  async executeQuery(
+    connection: SqlConnectionConfig,
+    query: string,
+    params: Record<string, unknown>,
+    timeout: number,
+  ): Promise<SqlExecResult> {
+    return this.executeQueryBatch(connection, query, [params], timeout).then(r => r[0]);
+  }
+
+  async executeQueryBatch(
+    connection: SqlConnectionConfig,
+    query: string,
+    paramSets: Record<string, unknown>[],
+    timeout: number,
+  ): Promise<SqlExecResult[]> {
+    const sql = await import('mssql');
+
+    const poolConfig = sql.ConnectionPool.parseConnectionString(connection.connectionString);
+    poolConfig.connectionTimeout = timeout * 1000;
+    poolConfig.requestTimeout = timeout * 1000;
+
+    const pool = new sql.ConnectionPool(poolConfig);
+    await pool.connect();
+    const results: SqlExecResult[] = [];
+
+    try {
+      for (let i = 0; i < paramSets.length; i++) {
+        const result = await this.executeQueryWithPool(pool, sql, query, paramSets[i]);
+        result.paramIndex = i;
+        results.push(result);
+      }
+    } finally {
+      await pool.close();
+    }
+
+    return results;
+  }
+
   private async executeWithPool(
     pool: import('mssql').ConnectionPool,
     sql: typeof import('mssql'),
@@ -84,32 +122,7 @@ export class MssqlDriver implements SqlDriver {
       const result = await request.execute(proc);
       const durationMs = Date.now() - startTime;
 
-      // Collect all result sets
-      const resultSets: SqlResultSet[] = [];
-      const recordsets = (result.recordsets ?? []) as any[];
-      if (recordsets.length > 0) {
-        for (const rs of recordsets) {
-          const columns = rs.columns ? Object.keys(rs.columns) : [];
-          const rows: Record<string, unknown>[] = [];
-          for (const row of rs) {
-            const obj: Record<string, unknown> = {};
-            for (const col of columns) {
-              obj[col] = (row as Record<string, unknown>)[col];
-            }
-            rows.push(obj);
-          }
-          resultSets.push({ columns, rows });
-        }
-      }
-
-      return {
-        paramIndex: -1,  // set by executeBatch
-        params,
-        resultSets,
-        returnValue: result.returnValue ?? null,
-        rowsAffected: result.rowsAffected ?? [],
-        durationMs,
-      };
+      return this.collectResultSets(result, params, durationMs);
     } catch (err) {
       return {
         paramIndex: -1,
@@ -121,6 +134,83 @@ export class MssqlDriver implements SqlDriver {
         error: String(err),
       };
     }
+  }
+
+  private async executeQueryWithPool(
+    pool: import('mssql').ConnectionPool,
+    sql: typeof import('mssql'),
+    query: string,
+    params: Record<string, unknown>,
+  ): Promise<SqlExecResult> {
+    const request = pool.request();
+
+    // Bind parameters with type inference (same as proc execution)
+    for (const [name, value] of Object.entries(params)) {
+      if (value === null || value === undefined) {
+        request.input(name, null);
+      } else if (typeof value === 'number' && Number.isInteger(value)) {
+        request.input(name, sql.Int, value);
+      } else if (typeof value === 'number') {
+        request.input(name, sql.Decimal(18, 4), value);
+      } else if (typeof value === 'boolean') {
+        request.input(name, sql.Bit, value);
+      } else {
+        request.input(name, sql.NVarChar, String(value));
+      }
+    }
+
+    const startTime = Date.now();
+    try {
+      const result = await request.query(query);
+      const durationMs = Date.now() - startTime;
+
+      return this.collectResultSets(result, params, durationMs);
+    } catch (err) {
+      return {
+        paramIndex: -1,
+        params,
+        resultSets: [],
+        returnValue: null,
+        rowsAffected: [],
+        durationMs: Date.now() - startTime,
+        error: String(err),
+      };
+    }
+  }
+
+  /**
+   * Shared helper: collect result sets from a mssql result object.
+   */
+  private collectResultSets(
+    result: any,
+    params: Record<string, unknown>,
+    durationMs: number,
+  ): SqlExecResult {
+    const resultSets: SqlResultSet[] = [];
+    const recordsets = (result.recordsets ?? []) as any[];
+    if (recordsets.length > 0) {
+      for (const rs of recordsets) {
+        const columns = rs.columns ? Object.keys(rs.columns) : [];
+        const rows: Record<string, unknown>[] = [];
+        for (const row of rs) {
+          const obj: Record<string, unknown> = {};
+          for (const col of columns) {
+            obj[col] = (row as Record<string, unknown>)[col];
+          }
+          rows.push(obj);
+        }
+        resultSets.push({ columns, rows });
+      }
+    }
+
+    return {
+      paramIndex: -1,  // set by caller (executeBatch / executeQueryBatch)
+      params,
+      resultSets,
+      returnValue: result.returnValue ?? null,
+      rowsAffected: result.rowsAffected ?? [],
+      durationMs,
+    };
   }
 
   async checkDependencies(): Promise<{ name: string; found: boolean; optional: boolean }[]> {
