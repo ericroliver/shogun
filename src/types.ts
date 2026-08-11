@@ -68,10 +68,14 @@ export interface SqlConnectionConfig {
 export interface SqlTestConfig {
   /** Named connection from config.connections */
   connection: string;
-  /** Stored procedure name */
-  proc: string;
-  /** Parameter sets — inline array or file reference */
-  parameters:
+  /** Stored procedure name (required if `query` is not set) */
+  proc?: string;
+  /** Raw SQL query to execute (required if `proc` is not set). Use @paramName for parameter substitution. */
+  query?: string;
+  /** Override name for the baseline file. Defaults to proc name or sanitized test name. */
+  baseline?: string;
+  /** Parameter sets — inline array, file reference, or omitted (provided via --params at runtime) */
+  parameters?:
     | { inline: Record<string, unknown>[] }
     | { file: string };
   /** Output artifact format. Baseline is always JSON. Default: json */
@@ -94,8 +98,10 @@ export interface SqlScriptContext {
   params: Record<string, unknown>[];
   /** Results after execution (available in post-script only, undefined in pre) */
   results?: import('./sql-driver.js').SqlExecResult[];
-  /** The proc name */
-  proc: string;
+  /** The proc name (undefined for query-based tests) */
+  proc?: string;
+  /** The raw SQL query (undefined for proc-based tests) */
+  query?: string;
   /** The connection name */
   connection: string;
 }

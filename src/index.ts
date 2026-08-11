@@ -54,6 +54,8 @@ Usage:
   shogun run --suite smoke            Run a named suite
   shogun run --file path/to/test.yaml Run single test file
   shogun run --format json            JSON output (for CI)
+  shogun run --output results.json    Write JSON results to file (for Playwright)
+  shogun run --params '[{"UserId":42}]'  Override SQL test params at runtime
   shogun run --backend unix           Force unix backend (curl + jq)
   shogun run --backend powershell     Force PowerShell backend
 
@@ -143,8 +145,11 @@ interface ParsedArgs {
   // init-specific
   initDir?: string;
   force?: boolean;
+  // output file for JSON results (Playwright integration)
+  output?: string;
+  // runtime parameter override for SQL tests (JSON string, e.g. '[{"UserId": 42}]')
+  params?: string;
 }
-
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {};
   for (let i = 0; i < argv.length; i++) {
@@ -212,7 +217,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       case '--out':        result.out = argv[++i]; break;
       case '--force':      result.force = true; break;
-      default:
+      case '--output':     result.output = argv[++i]; break;
+      case '--params':     result.params = argv[++i]; break;      default:
         if (arg.startsWith('--')) {
           // Unknown flag — skip the value token if it doesn't look like a flag
           // itself, then warn so the user knows the flag was not recognised.
@@ -307,7 +313,16 @@ async function main() {
       break;
     }
     case 'run': {
-      const exitCode = await run({ ...args, format: args.format as 'pretty' | 'json' | 'tap' | undefined });
+      const exitCode = await run({
+        env: args.env,
+        collection: args.collection,
+        tags: args.tags,
+        suite: args.suite,
+        file: args.file,
+        format: args.format as 'pretty' | 'json' | 'tap' | undefined,
+        output: args.output,
+        params: args.params,
+      });
       process.exit(exitCode);
       break;
     }

@@ -246,7 +246,9 @@ const ResponseDefSchema = z.object({
 // SQL test configuration schema
 const SqlTestConfigSchema = z.object({
   connection: z.string().min(1, 'sql.connection is required'),
-  proc: z.string().min(1, 'sql.proc is required'),
+  proc: z.string().min(1).optional(),
+  query: z.string().min(1).optional(),
+  baseline: z.string().optional(),
   parameters: z.union([
     z.object({
       inline: z.array(z.record(z.unknown())),
@@ -254,12 +256,15 @@ const SqlTestConfigSchema = z.object({
     z.object({
       file: z.string().min(1, 'sql.parameters.file is required'),
     }),
-  ]),
+  ]).optional(),
   outputFormat: z.enum(['json', 'csv', 'both']).optional(),
   timeout: z.number().optional(),
   pre: z.string().optional(),
   post: z.string().optional(),
-}).optional();
+}).refine(
+  (data) => data.proc || data.query,
+  { message: 'Either sql.proc or sql.query is required' },
+).optional();
 
 const TestDefinitionSchema = z.object({
   name: z.string().min(1, 'name is required'),
