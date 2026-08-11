@@ -12,6 +12,7 @@ import { snapshot } from './commands/snapshot.js';
 import { report } from './commands/report.js';
 import { lint } from './commands/lint.js';
 import { spec } from './commands/spec.js';
+import { sql as sqlCmd } from './commands/sql.js';
 import { coverage } from './commands/coverage/index.js';
 import { checkBackend } from './commands/check-backend.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
@@ -102,6 +103,17 @@ Usage:
   shogun coverage --format markdown   Markdown table output (for PRs/docs)
   shogun coverage --out report.md     Write report to file instead of stdout
 
+  shogun sql                          List all stored procs (all connections)
+  shogun sql --connection qa-db        List procs in one connection
+  shogun sql --schema dbo             Filter by database schema
+  shogun sql --search "user"          Search proc names + parameter names
+  shogun sql --proc dbo.sp_GetUser    Detail one proc (params, types, flags)
+  shogun sql --source dbo.sp_GetUser  Retrieve proc source definition
+  shogun sql --deps dbo.sp_GetUser   Show proc dependencies (tables, views, procs)
+  shogun sql --env QA                Load env for connection string interpolation
+  shogun sql --format json           JSON output (for scripting)
+  shogun sql --format markdown       Markdown table output (for docs/PRs)
+
   shogun --version                    Print version
   shogun --help                       Print this message
 `.trimStart();
@@ -124,6 +136,8 @@ interface ParsedArgs {
   schema?: string;
   search?: string;
   list?: boolean;
+  // sql command --proc flag (reuses --schema and --search existing fields)
+  proc?: string;
   // coverage-specific
   uncovered?: boolean;
   gaps?: boolean;
@@ -140,6 +154,10 @@ interface ParsedArgs {
   suppressDrift?: string[];  // --suppress-drift <code,code>: hide drift for these codes
   sql?: boolean;             // --sql: SQL stored procedure coverage mode
   live?: boolean;             // --live: live DB introspection (requires --sql)
+  // sql command-specific
+  sqlConnection?: string;      // --connection: filter by connection name
+  sqlSource?: string;          // --source: retrieve proc source definition
+  sqlDeps?: string;            // --deps: show proc dependencies (--schema and --search reuse existing fields)
   // init-specific
   initDir?: string;
   force?: boolean;
@@ -191,9 +209,22 @@ export function parseArgs(argv: string[]): ParsedArgs {
         result.suppressDrift = val ? val.split(',').map(s => s.trim()) : ['401'];
         break;
       }
-      case '--deps':       result.deps = true; break;
+      case '--deps': {
+        // Dual-purpose: `coverage --deps` (boolean) vs `sql --deps <proc>` (string)
+        const next = argv[i + 1];
+        if (next && !next.startsWith('--')) {
+          result.sqlDeps = argv[++i];
+        } else {
+          result.deps = true;
+        }
+        break;
+      }
       case '--sql':        result.sql = true; break;
       case '--live':       result.live = true; break;
+      // sql command flags (--schema and --search reuse existing ParsedArgs fields)
+      case '--connection': result.sqlConnection = argv[++i]; break;
+      case '--source':     result.sqlSource = argv[++i]; break;
+      case '--proc':       result.proc = argv[++i]; break;
       case '--compare': {
         result.compare = true;
         // Check for two positional run IDs after --compare
@@ -369,6 +400,21 @@ async function main() {
         suppressDrift: args.suppressDrift,
         sql: args.sql,
         live: args.live,
+        cwd: args.cwd,
+      });
+      process.exit(exitCode);
+      break;
+    }
+    case 'sql': {
+      const exitCode = await sqlCmd({
+        env: args.env,
+        connection: args.sqlConnection,
+        schema: args.schema,
+        proc: args.proc,
+        source: args.sqlSource,
+        deps: args.sqlDeps,
+        search: args.search,
+        format: args.format as 'pretty' | 'json' | 'markdown' | undefined,
         cwd: args.cwd,
       });
       process.exit(exitCode);

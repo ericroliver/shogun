@@ -7,7 +7,7 @@
  * run, so HTTP-only repos don't need the package installed.
  */
 
-import type { SqlDriver, SqlExecResult, SqlResultSet } from '../sql-driver.js';
+import type { SqlDriver, SqlExecResult, SqlResultSet, SqlDependency } from '../sql-driver.js';
 import type { SqlConnectionConfig } from '../types.js';
 import { SqlDriverRegistry } from '../sql-driver.js';
 
@@ -218,7 +218,174 @@ export class MssqlDriver implements SqlDriver {
       await pool.close();
     }
   }
+  async getProcSource(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<string | null> {
+    const sql = await import('mssql');
+
+    const poolConfig = sql.ConnectionPool.parseConnectionString(connection.connectionString);
+    poolConfig.connectionTimeout = timeout * 1000;
+    poolConfig.requestTimeout = timeout * 1000;
+
+    const pool = new sql.ConnectionPool(poolConfig);
+    await pool.connect();
+
+    try {
+      // Parse "schema.name" or bare "name" (assume dbo if no schema)
+      const parts = proc.split('.');
+      let schema = 'dbo';
+      let name = proc;
+      if (parts.length >= 2) {
+        schema = parts[0]!;
+        name = parts[1]!;
+      }
+
+      const request = pool.request();
+      request.input('schema', sql.NVarChar, schema);
+      request.input('procName', sql.NVarChar, name);
+      const result = await request.query(`
+        SELECT
+          m.definition
+        FROM sys.sql_modules m
+        JOIN sys.objects o ON m.object_id = o.object_id
+        JOIN sys.schemas s ON o.schema_id = s.schema_id
+        WHERE s.name = @schema
+          AND o.name = @procName
+          AND o.type IN ('P', 'PC')
+      `);
+
+      const rows = ((result.recordsets as unknown[]) ?? [result.recordset ?? []])[0] as Array<{ definition: string | null }>;
+      return rows.length > 0 ? (rows[0]!.definition ?? null) : null;
+    } finally {
+      await pool.close();
+    }
+  }
+
+  async getProcDependencies(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<SqlDependency[]> {
+    const sql = await import('mssql');
+
+    const poolConfig = sql.ConnectionPool.parseConnectionString(connection.connectionString);
+    poolConfig.connectionTimeout = timeout * 1000;
+    poolConfig.requestTimeout = timeout * 1000;
+
+    const pool = new sql.ConnectionPool(poolConfig);
+    await pool.connect();
+
+    try {
+      // Parse "schema.name" or bare "name" (assume dbo if no schema)
+      const parts = proc.split('.');
+      let schema = 'dbo';
+      let name = proc;
+      if (parts.length >= 2) {
+        schema = parts[0]!;
+        name = parts[1]!;
+      }
+
+      const request = pool.request();
+      request.input('schema', sql.NVarChar, schema);
+      request.input('procName', sql.NVarChar, name);
+      const result = await request.query(`
+        SELECT
+          CASE
+            WHEN sed.referenced_database_name IS NOT NULL
+              THEN sed.referenced_database_name + '.' + ISNULL(sed.referenced_schema_name, '') + '.' + sed.referenced_entity_name
+            ELSE ISNULL(sed.referenced_schema_name, '') + '.' + sed.referenced_entity_name
+          END AS qualified_name,
+          ISNULL(sed.referenced_schema_name, '') AS ref_schema,
+          sed.referenced_entity_name AS ref_name,
+          sed.referenced_class_desc AS ref_type,
+          sed.referenced_database_name AS ref_database,
+          sed.is_schema_bound,
+          CASE
+            WHEN sed.referenced_class = 1 THEN 'TABLE_OR_VIEW'
+            WHEN sed.referenced_class = 2 THEN 'TABLE_VALUED_FUNCTION'
+            WHEN sed.referenced_class = 5 THEN 'PROCEDURE'
+            WHEN sed.referenced_class = 6 THEN 'SCALAR_FUNCTION'
+            WHEN sed.referenced_class = 7 THEN 'AGGREGATE_FUNCTION'
+            WHEN sed.referenced_class = 12 THEN 'TYPE'
+            WHEN sed.referenced_class = 15 THEN 'XML_SCHEMA_COLLECTION'
+            ELSE sed.referenced_class_desc
+          END AS object_type,
+          sed.caller_column_name,
+          sed.called_column_name,
+          COALESCE(
+            (SELECT TOP 1 o.type_desc
+             FROM sys.objects o
+             WHERE o.name = sed.referenced_entity_name
+               AND o.schema_id = ISNULL(
+                 (SELECT schema_id FROM sys.schemas WHERE name = sed.referenced_schema_name),
+                 SCHEMA_ID('dbo')
+               )
+            ),
+            sed.referenced_class_desc
+          ) AS resolved_type
+        FROM sys.sql_expression_dependencies sed
+        JOIN sys.objects o ON sed.referencing_id = o.object_id
+        JOIN sys.schemas s ON o.schema_id = s.schema_id
+        WHERE s.name = @schema
+          AND o.name = @procName
+          AND o.type IN ('P', 'PC')
+        ORDER BY sed.referenced_schema_name, sed.referenced_entity_name
+      `);
+
+      const rows = ((result.recordsets as unknown[]) ?? [result.recordset ?? []])[0] as Array<{
+        qualified_name: string;
+        ref_schema: string;
+        ref_name: string;
+        ref_type: string;
+        ref_database: string | null;
+        resolved_type: string | null;
+      }>;
+
+      const deps: SqlDependency[] = rows.map(row => ({
+        schema: row.ref_schema || '',
+        name: row.ref_name || '',
+        qualifiedName: row.qualified_name || `${row.ref_schema}.${row.ref_name}`,
+        type: (row.resolved_type ?? row.ref_type ?? 'UNKNOWN').replace(/_/g, ' '),
+        referenceType: inferReferenceType(row.ref_type),
+        isCrossDatabase: row.ref_database !== null,
+        isUnresolved: row.resolved_type === null,
+      }));
+
+      return deps;
+    } finally {
+      await pool.close();
+    }
+  }
 }
 
 // Auto-register on import
 SqlDriverRegistry.register('mssql', new MssqlDriver());
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Infer how a proc references an object based on the referenced_class_desc.
+ * sys.sql_expression_dependencies doesn't directly store the DML type, but
+ * the referenced class gives us a reasonable approximation.
+ */
+function inferReferenceType(refClassDesc: string): string {
+  // referenced_class_desc values from sys.sql_expression_dependencies:
+  //   TYPE, XML_SCHEMA_COLLECTION, TABLE_TYPE, AGGREGATE_FUNCTION,
+  //   SCALAR_FUNCTION, TABLE_VALUED_FUNCTION, PROCEDURE, TABLE
+  switch (refClassDesc) {
+    case 'PROCEDURE':
+      return 'EXECUTE';
+    case 'TABLE':
+      return 'SELECT';  // Could be INSERT/UPDATE/DELETE — sys.sql_expression_dependencies doesn't distinguish
+    case 'TABLE_VALUED_FUNCTION':
+    case 'SCALAR_FUNCTION':
+    case 'AGGREGATE_FUNCTION':
+      return 'CALL';
+    default:
+      return 'REFERENCE';
+  }
+}
