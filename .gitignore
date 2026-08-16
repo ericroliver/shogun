@@ -18,6 +18,15 @@ envs/*.env
 !envs/*.env.example
 !envs/local.env.example
 
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.pfx
+*.p12
+
 # Keep expected/ baselines in source control (they are the source of truth)
 # !expected/
 

@@ -587,12 +587,17 @@ async function runSqlCoverage(
     return 1;
   }
 
-  if (sqlEntries.length === 0) {
+  if (sqlEntries.length === 0 && !args.live) {
     console.error('No SQL test files found.');
     console.error('');
     console.error('SQL tests require `type: sql` in the test YAML and a `sql:` block');
     console.error('with `connection` and `proc` fields. See docs/technical/sql-proc-testing-design.md');
     return 1;
+  }
+
+  if (sqlEntries.length === 0 && args.live) {
+    // No test files, but --live was requested — proceed to show DB proc inventory
+    console.error('No SQL test files found — showing live DB inventory only (--live mode).');
   }
 
   // 2. Load run results if requested (--last-run or --run)
@@ -628,8 +633,10 @@ async function runSqlCoverage(
     await import('../../drivers/mssql-driver.js');
     const { resolveSqlConnection } = await import('../../loader.js');
 
-    // Get distinct connections used by SQL tests
-    const testedConnections = [...new Set(procs.map(p => p.connection))];
+    // Get distinct connections used by SQL tests, or all config connections if no tests exist
+    const testedConnections = procs.length > 0
+      ? [...new Set(procs.map(p => p.connection))]
+      : Object.keys(config.connections ?? {});
 
     for (const connName of testedConnections) {
       const connConfig = resolveSqlConnection(connName, config, env);

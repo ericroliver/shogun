@@ -81,12 +81,14 @@ export interface SqlExecResult {
   params: Record<string, unknown>;
   /** Result sets returned by the proc (most procs return 0–1) */
   resultSets: SqlResultSet[];
-  /** Proc return value (OUTPUT params not supported in v1) */
+  /** Proc return value (numeric return code from stored procedure) */
   returnValue?: number | null;
+  /** OUTPUT parameter values captured after execution (proc tests only) */
+  outputParams?: Record<string, unknown>;
   /** Rows affected per statement */
   rowsAffected: number[];
   /** Execution duration in ms */
-  durationMs: number;
+  durationMs?: number;
   /** Error if execution failed */
   error?: string;
 }
