@@ -9,8 +9,8 @@
  *  - dependsOn: automatically resolves and runs test dependencies before the target test
  */
 
-import { join, relative } from 'node:path';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
@@ -33,6 +33,7 @@ import type {
   ShogunRequest, ShogunResponse, TestResult, TestTimings, EnvVars,
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
   TestDefinition, SqlConnectionConfig, SqlScriptContext,
+  AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig,
 } from './types.js';
 
 export interface RunOptions {
@@ -489,6 +490,10 @@ async function runSingleTest(
     return runSqlTest(test, file, opts);
   }
 
+  if (testType === 'agent' && test.agent) {
+    return runAgentTest(test, file, opts);
+  }
+
   // Existing HTTP path — unchanged
   return runHttpTest(test, file, opts);
 }
@@ -862,6 +867,159 @@ async function runSqlTest(
 }
 
 // ---------------------------------------------------------------------------
+// Agent test execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs an agent test by constructing an OpenAI-compatible /chat/completions
+ * request, sending it to the target agent via executeRequest(), and
+ * extracting choices[0].message.content as the agent output.
+ *
+ * The evaluation phase (Story 4) is not yet wired — this function returns
+ * a placeholder result with status 'failed' and an error noting that
+ * evaluation is not yet implemented.
+ */
+export async function runAgentTest(
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const startMs = Date.now();
+  const scriptOutput: string[] = [];
+  const agent = test.agent!;
+
+  // --- 1. Construct OpenAI-compatible request body ---
+  const messages: Array<{ role: string; content: string }> = [];
+
+  if (agent.parameters?.system_prompt) {
+    messages.push({ role: 'system', content: agent.parameters.system_prompt });
+  }
+
+  let userContent = agent.prompt;
+
+  // Append context file contents to the user message
+  if (agent.parameters?.context_files?.length) {
+    for (const filePath of agent.parameters.context_files) {
+      try {
+        const resolved = resolve(opts.cwd, filePath);
+        const contents = readFileSync(resolved, 'utf8');
+        userContent += `\n\n--- ${filePath} ---\n${contents}`;
+      } catch (err) {
+        return makeFailedResult(test.name, file, startMs, {},
+          `Failed to read context file "${filePath}": ${err}`, scriptOutput);
+      }
+    }
+  }
+
+  messages.push({ role: 'user', content: userContent });
+
+  const requestBody: Record<string, unknown> = {
+    model: agent.model,
+    messages,
+    temperature: agent.temperature ?? 0.7,
+  };
+
+  if (agent.max_tokens !== undefined) {
+    requestBody.max_tokens = agent.max_tokens;
+  }
+
+  // --- 2. Build ShogunRequest ---
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (agent.api_key) {
+    headers['Authorization'] = `Bearer ${agent.api_key}`;
+  }
+
+  const request: ShogunRequest = {
+    method: 'POST',
+    path: agent.endpoint,
+    url: agent.endpoint,  // full URL, not relative to BASE_URL
+    headers,
+    params: {},
+    body: JSON.stringify(requestBody),
+  };
+
+  // --- 3. Execute HTTP request to target agent ---
+  // Disable AUTH_TOKEN auto-injection (Constraint 3)
+  let response: ShogunResponse;
+  try {
+    response = await executeRequest(request, opts.env, {
+      timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 300), 10),
+      autoInjectAuth: false,  // explicitly disabled
+      contentType: 'application/json',
+    });
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Agent HTTP request failed: ${err}`, scriptOutput),
+      agentResponse: undefined,
+      resolvedRequest: request,
+    };
+  }
+
+  const curlMs = response.curlMs;
+
+  // --- 4. Extract choices[0].message.content (Constraint 2) ---
+  let agentOutput: string;
+  try {
+    const body = typeof response.body === 'string'
+      ? JSON.parse(response.body)
+      : response.body;
+
+    const content = body?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || content.trim() === '') {
+      // Execution failure — not a grade of zero
+      return {
+        ...makeFailedResult(test.name, file, startMs, {},
+          'Agent response missing choices[0].message.content or content is empty', scriptOutput),
+        agentResponse: response,
+        resolvedRequest: request,
+      };
+    }
+    agentOutput = content;
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Failed to parse agent response: ${err}`, scriptOutput),
+      agentResponse: response,
+      resolvedRequest: request,
+    };
+  }
+
+  // --- 5. Hand off to evaluation ---
+  // The evaluation phase is implemented in Story 4.
+  // For now, we return a placeholder result that includes the agent output.
+  // Story 4 will replace this with the full evaluation flow.
+
+  // TODO: Story 4 — call evaluateAgentResponse() here
+  // TODO: Story 5 — validate evaluator response, apply min_pass, produce EvaluationAssertionResult
+
+  const durationMs = Date.now() - startMs;
+  const timings: TestTimings = {
+    curlMs,
+    assertMs: 0,  // will be filled by evaluation (Story 4/5)
+    preMs: 0,
+    postMs: 0,
+    otherMs: Math.max(0, durationMs - curlMs),
+  };
+
+  return {
+    name: test.name,
+    file,
+    status: 'failed',  // placeholder until evaluation is implemented
+    durationMs,
+    timings,
+    assertions: {},
+    error: 'Agent test runner implemented; evaluation not yet wired (Story 4)',
+    scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    agentResponse: response,
+    resolvedRequest: request,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Test display helper
 // ---------------------------------------------------------------------------
 
@@ -870,6 +1028,12 @@ async function runSqlTest(
  * which don't have a `request` field.
  */
 function getTestDisplayInfo(test: TestDefinition): { method: string; path: string } {
+  if (test.type === 'agent' && test.agent) {
+    return {
+      method: 'AGENT',
+      path: test.agent.model ?? '(unknown model)',
+    };
+  }
   if (test.type === 'sql' && test.sql) {
     if (test.sql.query) {
       // Show a truncated version of the query
