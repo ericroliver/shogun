@@ -21,6 +21,7 @@ import type {
   CoverageMinThresholds,
   SqlConnectionConfig,
   SqlTestConfig,
+  AgentEvaluateConfig,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -707,6 +708,64 @@ export function resolveSqlConnection(
     driver: conn.driver,
     connectionString: interpolateEnv(conn.connectionString, env),
     timeout: conn.timeout,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent evaluation config resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the evaluation configuration for a specific test run.
+ * Merges per-test evaluate config over global evaluation config.
+ * Performs environment interpolation on all string values.
+ *
+ * @param testEvaluate - Per-test `evaluate` block (may override global)
+ * @param config - Global shogun config (may contain `evaluation` block)
+ * @param env - Selected environment vars
+ * @returns Resolved evaluation config with endpoint, model, api_key, temperature
+ * @throws if no endpoint or model is available (global or per-test)
+ */
+export function resolveEvaluationConfig(
+  testEvaluate: AgentEvaluateConfig | undefined,
+  config: ShogunConfig,
+  env: EnvVars,
+): {
+  endpoint: string;
+  model: string;
+  api_key?: string;
+  temperature: number;
+  evaluator_system_prompt?: string;
+} {
+  const globalEval = config.evaluation;
+
+  const endpoint = testEvaluate?.endpoint
+    ?? globalEval?.endpoint;
+  const model = testEvaluate?.model
+    ?? globalEval?.model;
+  const api_key = testEvaluate?.api_key
+    ?? globalEval?.api_key;
+  const temperature = testEvaluate?.temperature
+    ?? globalEval?.temperature
+    ?? 0;
+
+  if (!endpoint) {
+    throw new Error(
+      'Evaluation endpoint is required. Set evaluation.endpoint in shogun.config.yaml or evaluate.endpoint in the test.'
+    );
+  }
+  if (!model) {
+    throw new Error(
+      'Evaluation model is required. Set evaluation.model in shogun.config.yaml or evaluate.model in the test.'
+    );
+  }
+
+  return {
+    endpoint: interpolateEnv(endpoint, env),
+    model: interpolateEnv(model, env),
+    api_key: api_key ? interpolateEnv(api_key, env) : undefined,
+    temperature,
+    evaluator_system_prompt: testEvaluate?.evaluator_system_prompt,
   };
 }
 
