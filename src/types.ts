@@ -106,6 +106,102 @@ export interface SqlScriptContext {
   connection: string;
 }
 
+// ---------------------------------------------------------------------------
+// Agent Testing Types
+// ---------------------------------------------------------------------------
+
+/**
+ * Agent test configuration.
+ * Present when `type === 'agent'` on a TestDefinition.
+ */
+export interface AgentTestConfig {
+  /** OpenAI-compatible /chat/completions endpoint URL (required) */
+  endpoint: string;
+  /** Model identifier for the target agent (required) */
+  model: string;
+  /** The prompt sent to the target agent (required) */
+  prompt: string;
+  /** Target agent temperature (optional, default 0.7) */
+  temperature?: number;
+  /** Max tokens for target agent response (optional — omitted from request body if not set) */
+  max_tokens?: number;
+  /** API key for target agent, sent as Authorization: Bearer <key>. If not set, no auth header. */
+  api_key?: string;
+  /** Optional additional parameters */
+  parameters?: {
+    /** Mapped to messages[0] with role: "system" */
+    system_prompt?: string;
+    /** File paths whose contents are appended to the user message */
+    context_files?: string[];
+  };
+}
+
+/**
+ * Expected behavior definition for agent tests.
+ * At least one of `description` or `evaluate.criteria` must be present.
+ */
+export interface AgentExpectedDef {
+  /** Semantic description of expected behavior */
+  description?: string;
+}
+
+/**
+ * Evaluation configuration for agent tests.
+ * Can appear at test level; endpoint/model/api_key fall back to global config.
+ */
+export interface AgentEvaluateConfig {
+  /** List of evaluation criteria (optional, but at least one of criteria or expected.description is required) */
+  criteria?: string[];
+  /** Minimum grade (0–100) to pass. Default: 80 */
+  min_pass?: number;
+  /** Override global evaluator endpoint */
+  endpoint?: string;
+  /** Override global evaluator model */
+  model?: string;
+  /** Override global evaluator API key */
+  api_key?: string;
+  /** Override global evaluator temperature. Default: 0 */
+  temperature?: number;
+  /** Optional system prompt for the evaluator */
+  evaluator_system_prompt?: string;
+}
+
+/**
+ * The structured JSON that the evaluator LLM must return.
+ * Shogun parses and validates this; any deviation is an evaluation error.
+ */
+export interface EvaluatorResponse {
+  status: 'evaluated' | 'indeterminate';
+  /** Required when status === 'evaluated' */
+  grade?: number;
+  reasoning: string;
+  criteriaResults?: {
+    criterion: string;
+    met: boolean;
+    reasoning?: string;
+  }[];
+}
+
+/**
+ * Shogun's assertion result for an agent test.
+ * Produced by Shogun after validating the EvaluatorResponse and applying min_pass.
+ */
+export interface EvaluationAssertionResult {
+  status: 'evaluated' | 'indeterminate';
+  /** From evaluator, present when status === 'evaluated' */
+  grade?: number;
+  /** Computed by Shogun: grade >= min_pass */
+  passed: boolean;
+  reasoning: string;
+  criteriaResults?: {
+    criterion: string;
+    met: boolean;
+    reasoning?: string;
+  }[];
+  evaluatorModel?: string;
+  durationMs?: number;
+}
+
 export interface ResponseDef {
   /** Expected HTTP status code */
   status?: number;
@@ -128,8 +224,8 @@ export interface ResponseDef {
 export interface TestDefinition {
   name: string;
   description?: string;
-  /** Test type: 'http' (default) or 'sql'. Existing YAML files omit this field. */
-  type?: 'http' | 'sql';
+  /** Test type: 'http' (default), 'sql', or 'agent'. Existing YAML files omit this field. */
+  type?: 'http' | 'sql' | 'agent';
   collection?: string;
   tags?: string[];
   /**
@@ -150,6 +246,12 @@ export interface TestDefinition {
   post?: string;
   /** SQL test configuration. Used when type is 'sql'. */
   sql?: SqlTestConfig;
+  /** Agent test configuration. Used when type is 'agent'. */
+  agent?: AgentTestConfig;
+  /** Expected behavior definition for agent tests. */
+  expected?: AgentExpectedDef;
+  /** Evaluation configuration for agent tests. */
+  evaluate?: AgentEvaluateConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +435,8 @@ export interface AssertionResults {
   snapshotDiff?: string | null;
   postScript?: boolean;
   postScriptError?: string;
+  // Agent test evaluation result
+  evaluation?: EvaluationAssertionResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +493,14 @@ export interface TestResult {
     errors: number;
     totalRows: number;
   };
+
+  // Agent test diagnostics (present only for type: agent tests)
+  /** Raw target agent HTTP response (on failure or verbose) */
+  agentResponse?: ShogunResponse;
+  /** The evaluation prompt HTTP request (on failure or verbose) */
+  evaluationRequest?: ShogunRequest;
+  /** Raw evaluator HTTP response (on failure or verbose) */
+  evaluationResponse?: ShogunResponse;
 }
 
 export interface RunSummary {
@@ -504,6 +616,17 @@ export interface CoverageConfig {
   suppressDrift?: string[];
 }
 
+/**
+ * Global evaluation configuration in shogun.config.yaml.
+ * Per-test evaluate config can override endpoint/model/api_key.
+ */
+export interface EvaluationConfig {
+  endpoint: string;
+  api_key?: string;
+  model: string;
+  temperature?: number;  // default 0
+}
+
 export interface ShogunConfig {
   version: number;
   defaults?: {
@@ -546,6 +669,8 @@ export interface ShogunConfig {
   connections?: Record<string, SqlConnectionConfig>;
   /** Coverage report v2 configuration. All keys optional. */
   coverage?: CoverageConfig;
+  /** Global evaluation configuration for agent tests. */
+  evaluation?: EvaluationConfig;
 }
 
 // ---------------------------------------------------------------------------
