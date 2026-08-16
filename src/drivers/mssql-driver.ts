@@ -93,6 +93,112 @@ export class MssqlDriver implements SqlDriver {
     return results;
   }
 
+  /**
+   * Map a SQL type name string to the corresponding mssql type constant.
+   * Used when declaring OUTPUT parameters where we need the correct type.
+   */
+  private mapSqlType(sql: typeof import('mssql'), typeName: string): any {
+    const t = typeName.toLowerCase();
+    switch (t) {
+      case 'int':
+      case 'integer':
+        return sql.Int;
+      case 'bigint':
+        return sql.BigInt;
+      case 'smallint':
+        return sql.SmallInt;
+      case 'tinyint':
+        return sql.TinyInt;
+      case 'bit':
+        return sql.Bit;
+      case 'decimal':
+        return sql.Decimal(18, 4);
+      case 'numeric':
+        return sql.Numeric(18, 4);
+      case 'money':
+        return sql.Money;
+      case 'smallmoney':
+        return sql.SmallMoney;
+      case 'float':
+        return sql.Float;
+      case 'real':
+        return sql.Real;
+      case 'date':
+        return sql.Date;
+      case 'datetime':
+        return sql.DateTime;
+      case 'datetime2':
+        return sql.DateTime2;
+      case 'smalldatetime':
+        return sql.SmallDateTime;
+      case 'time':
+        return sql.Time;
+      case 'datetimeoffset':
+        return sql.DateTimeOffset;
+      case 'uniqueidentifier':
+        return sql.UniqueIdentifier;
+      case 'xml':
+        return sql.Xml;
+      case 'varchar':
+        return sql.VarChar(sql.MAX);
+      case 'nvarchar':
+        return sql.NVarChar(sql.MAX);
+      case 'char':
+        return sql.Char(sql.MAX);
+      case 'nchar':
+        return sql.NChar(sql.MAX);
+      case 'varbinary':
+        return sql.VarBinary(sql.MAX);
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Introspect a proc's parameter metadata to find OUTPUT parameters.
+   * Returns a map of param name (without @) -> type name for all OUTPUT params.
+   */
+  private async getProcOutputParams(
+    pool: import('mssql').ConnectionPool,
+    sql: typeof import('mssql'),
+    proc: string,
+  ): Promise<Map<string, string>> {
+    const parts = proc.split('.');
+    let schema = 'dbo';
+    let name = proc;
+    if (parts.length >= 2) {
+      schema = parts[0]!;
+      name = parts[1]!;
+    }
+
+    const request = pool.request();
+    request.input('schema', sql.NVarChar, schema);
+    request.input('procName', sql.NVarChar, name);
+    const result = await request.query(`
+      SELECT
+        REPLACE(prm.name, '@', '') AS param_name,
+        TYPE_NAME(prm.user_type_id) AS type_name
+      FROM sys.parameters prm
+      JOIN sys.procedures p ON prm.object_id = p.object_id
+      JOIN sys.schemas s ON p.schema_id = s.schema_id
+      WHERE s.name = @schema
+        AND p.name = @procName
+        AND prm.is_output = 1
+      ORDER BY prm.parameter_id
+    `);
+
+    const rows = ((result.recordsets as unknown[]) ?? [result.recordset ?? []])[0] as Array<{
+      param_name: string;
+      type_name: string;
+    }>;
+
+    const outputParams = new Map<string, string>();
+    for (const row of rows) {
+      outputParams.set(row.param_name, row.type_name);
+    }
+    return outputParams;
+  }
+
   private async executeWithPool(
     pool: import('mssql').ConnectionPool,
     sql: typeof import('mssql'),
@@ -101,11 +207,15 @@ export class MssqlDriver implements SqlDriver {
   ): Promise<SqlExecResult> {
     const request = pool.request();
 
-    // Bind parameters with type inference
+    // Introspect proc metadata to find OUTPUT parameters
+    const outputParamDefs = await this.getProcOutputParams(pool, sql, proc);
+
+    // Bind user-provided parameters as INPUT (skip OUTPUT params)
     for (const [name, value] of Object.entries(params)) {
+      if (outputParamDefs.has(name)) continue;
+
       if (value === null || value === undefined) {
-        // Pass null without a type — mssql handles it
-        request.input(name, null);
+        request.input(name, sql.NVarChar, null);
       } else if (typeof value === 'number' && Number.isInteger(value)) {
         request.input(name, sql.Int, value);
       } else if (typeof value === 'number') {
@@ -117,12 +227,37 @@ export class MssqlDriver implements SqlDriver {
       }
     }
 
+    // Declare OUTPUT parameters (both user-supplied and missing ones)
+    for (const [name, typeName] of outputParamDefs) {
+      const sqlType = this.mapSqlType(sql, typeName);
+      const userValue = params[name];
+      const resolvedType = sqlType ?? sql.NVarChar;
+      if (userValue !== undefined && userValue !== null) {
+        request.input(name, resolvedType, userValue);
+      } else {
+        request.output(name, resolvedType);
+      }
+    }
+
     const startTime = Date.now();
     try {
       const result = await request.execute(proc);
       const durationMs = Date.now() - startTime;
 
-      return this.collectResultSets(result, params, durationMs);
+      // Capture OUTPUT parameter values from the request
+      const outputValues: Record<string, unknown> = {};
+      for (const name of outputParamDefs.keys()) {
+        const paramInfo = (request.parameters as any)[name];
+        if (paramInfo !== undefined) {
+          outputValues[name] = paramInfo.value;
+        }
+      }
+
+      const execResult = this.collectResultSets(result, params, durationMs);
+      if (Object.keys(outputValues).length > 0) {
+        execResult.outputParams = outputValues;
+      }
+      return execResult;
     } catch (err) {
       return {
         paramIndex: -1,
@@ -135,7 +270,6 @@ export class MssqlDriver implements SqlDriver {
       };
     }
   }
-
   private async executeQueryWithPool(
     pool: import('mssql').ConnectionPool,
     sql: typeof import('mssql'),
@@ -147,7 +281,7 @@ export class MssqlDriver implements SqlDriver {
     // Bind parameters with type inference (same as proc execution)
     for (const [name, value] of Object.entries(params)) {
       if (value === null || value === undefined) {
-        request.input(name, null);
+        request.input(name, sql.NVarChar, null);
       } else if (typeof value === 'number' && Number.isInteger(value)) {
         request.input(name, sql.Int, value);
       } else if (typeof value === 'number') {
@@ -391,7 +525,7 @@ export class MssqlDriver implements SqlDriver {
           sed.referenced_entity_name AS ref_name,
           sed.referenced_class_desc AS ref_type,
           sed.referenced_database_name AS ref_database,
-          sed.is_schema_bound,
+          sed.is_schema_bound_reference AS is_schema_bound,
           CASE
             WHEN sed.referenced_class = 1 THEN 'TABLE_OR_VIEW'
             WHEN sed.referenced_class = 2 THEN 'TABLE_VALUED_FUNCTION'
@@ -402,8 +536,6 @@ export class MssqlDriver implements SqlDriver {
             WHEN sed.referenced_class = 15 THEN 'XML_SCHEMA_COLLECTION'
             ELSE sed.referenced_class_desc
           END AS object_type,
-          sed.caller_column_name,
-          sed.called_column_name,
           COALESCE(
             (SELECT TOP 1 o.type_desc
              FROM sys.objects o

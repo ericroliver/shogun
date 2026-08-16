@@ -128,13 +128,14 @@ function normalizeSqlResults(
   results: SqlExecResult[],
   ignoreFields: string[],
 ): SqlExecResult[] {
-  if (!ignoreFields.length) return results;
-
   const ignoreSet = new Set(ignoreFields.map(f => f.replace(/\*\*\./g, '')));
 
-  return results.map(result => ({
-    ...result,
-    resultSets: result.resultSets.map(rs => ({
+  return results.map(result => {
+    // Strip volatile metadata fields that change on every run
+    const { durationMs, ...stable } = result;
+    return {
+      ...stable,
+      resultSets: result.resultSets.map(rs => ({
       columns: rs.columns.filter(c => !ignoreSet.has(c)),
       rows: rs.rows.map(row => {
         const filtered: Record<string, unknown> = {};
@@ -146,7 +147,8 @@ function normalizeSqlResults(
         return filtered;
       }),
     })),
-  }));
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
