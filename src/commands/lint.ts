@@ -66,6 +66,86 @@ export async function lint(args: LintArgs): Promise<number> {
   }
 
   // -------------------------------------------------------------------------
+  // Phase 1b: SQL test validation (connection refs + parameter files)
+  // -------------------------------------------------------------------------
+
+  if (validFiles.length > 0) {
+    console.log('\nValidating SQL test definitions...\n');
+
+    for (const file of validFiles) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = yaml.load(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      } catch {
+        continue; // Already caught in Phase 1
+      }
+
+      // Skip non-SQL tests
+      if (parsed?.type !== 'sql') continue;
+
+      const sql = parsed?.sql as Record<string, unknown> | undefined;
+      if (!sql) {
+        errorCount++;
+        console.error(`  ✗ ${file}`);
+        console.error(`    type: sql but missing sql: block`);
+        continue;
+      }
+
+      let testOk = true;
+
+      // Validate connection ref
+      const connectionName = sql.connection as string | undefined;
+      if (connectionName && config.connections && !config.connections[connectionName]) {
+        errorCount++;
+        testOk = false;
+        console.error(`  ✗ ${file}`);
+        console.error(`    sql.connection: "${connectionName}" not found in config.connections`);
+        console.error(`    Available: ${Object.keys(config.connections).join(', ') || '(none)'}`);
+      } else if (connectionName && !config.connections) {
+        errorCount++;
+        testOk = false;
+        console.error(`  ✗ ${file}`);
+        console.error(`    sql.connection: "${connectionName}" — no connections block in shogun.config.yaml`);
+      }
+
+      // Validate parameter file (if file-based)
+      const params = sql.parameters as Record<string, unknown> | undefined;
+      if (params && 'file' in params) {
+        const paramFile = params.file as string;
+        const testDir = resolve(file, '..');
+        const paramPath = resolve(testDir, paramFile);
+        if (!existsSync(paramPath)) {
+          errorCount++;
+          testOk = false;
+          console.error(`  ✗ ${file}`);
+          console.error(`    sql.parameters.file: "${paramFile}" — file not found at ${paramPath}`);
+        } else {
+          // Validate the parameter file has the right structure
+          try {
+            const paramRaw = readFileSync(paramPath, 'utf8');
+            const paramParsed = yaml.load(paramRaw) as Record<string, unknown>;
+            if (!paramParsed || !Array.isArray(paramParsed.parameters)) {
+              errorCount++;
+              testOk = false;
+              console.error(`  ✗ ${file}`);
+              console.error(`    sql.parameters.file: "${paramFile}" — missing "parameters" array`);
+            }
+          } catch (paramErr) {
+            errorCount++;
+            testOk = false;
+            console.error(`  ✗ ${file}`);
+            console.error(`    sql.parameters.file: "${paramFile}" — ${paramErr instanceof Error ? paramErr.message : String(paramErr)}`);
+          }
+        }
+      }
+
+      if (testOk) {
+        console.log(`  ✓ ${file} (sql: ${sql.proc})`);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Phase 2: Collection-level validation (setup_fixtures + order refs)
   // -------------------------------------------------------------------------
 
@@ -200,6 +280,17 @@ export async function lint(args: LintArgs): Promise<number> {
       const src = parsed?.[slot];
       if (typeof src === 'string' && src.trim()) {
         scriptSlots.push({ slot, source: src });
+      }
+    }
+
+    // SQL pre/post scripts (nested under sql: block)
+    const sqlBlock = parsed?.sql as Record<string, unknown> | undefined;
+    if (sqlBlock) {
+      for (const slot of ['pre', 'post'] as const) {
+        const src = sqlBlock[slot];
+        if (typeof src === 'string' && src.trim()) {
+          scriptSlots.push({ slot: `sql.${slot}`, source: src });
+        }
       }
     }
 

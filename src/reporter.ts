@@ -32,6 +32,42 @@ export function printTestStart(name: string, method: string, path: string): void
   process.stdout.write(`  ${c.cyan}→${c.reset} ${c.dim}${method}${c.reset} ${path} ${c.dim}(${name})${c.reset} ... `);
 }
 
+// ---------------------------------------------------------------------------
+// SQL test output
+// ---------------------------------------------------------------------------
+
+/**
+ * Print per-parameter-set details for an SQL test result.
+ * Shows param index, row counts, durations, and snapshot match status.
+ */
+export function printSqlTestDetails(result: TestResult): void {
+  const summary = result.sqlExecSummary;
+  if (!summary) return;
+
+  // On failure, show brief details
+  if (result.status === 'failed') {
+    if (result.error) {
+      console.log(`    ${c.red}✗ ${result.error}${c.reset}`);
+    }
+    if (result.assertions.snapshotDiff) {
+      const diffLines = result.assertions.snapshotDiff.split('\n').slice(0, 20);
+      for (const line of diffLines) {
+        if (line.startsWith('-')) {
+          console.log(`    ${c.red}${line}${c.reset}`);
+        } else if (line.startsWith('+')) {
+          console.log(`    ${c.green}${line}${c.reset}`);
+        } else {
+          console.log(`    ${c.dim}${line}${c.reset}`);
+        }
+      }
+    }
+    if (summary.errors > 0) {
+      console.log(`    ${c.red}✗ ${summary.errors}/${summary.totalParams} param sets had execution errors${c.reset}`);
+    }
+    console.log(`    ${c.dim}Total: ${summary.totalParams} params, ${summary.totalRows} rows${c.reset}`);
+  }
+}
+
 export function printTestResult(result: TestResult): void {
   const httpCode = result.httpStatus != null ? `${result.httpStatus} ` : '';
   switch (result.status) {

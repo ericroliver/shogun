@@ -12,6 +12,8 @@ export interface RunArgs {
   suite?: string;
   file?: string;
   format?: 'pretty' | 'json' | 'tap';
+  output?: string;
+  params?: string;
 }
 
 export async function run(args: RunArgs): Promise<number> {
@@ -23,7 +25,14 @@ export async function run(args: RunArgs): Promise<number> {
       suite: args.suite,
       file: args.file,
       format: args.format,
+      params: args.params,
     });
+
+    // Write JSON output to file (for Playwright and other integrations)
+    if (args.output) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(args.output, JSON.stringify(summary, null, 2) + '\n', 'utf8');
+    }
 
     if (args.format === 'json') {
       printReport(summary, 'json');

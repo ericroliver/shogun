@@ -25,6 +25,7 @@ import type {
   ShogunRequest,
   ShogunResponse,
   EnvVars,
+  SqlScriptContext,
 } from './types.js';
 
 export interface ScriptRunResult {
@@ -81,6 +82,14 @@ export interface ScriptContext {
   request: ShogunRequest;
   response?: ShogunResponse;
   scriptsDir: string;
+  /**
+   * Default Content-Type header for http calls made from pre/post scripts.
+   * Falls back to 'application/json' if not provided.
+   * Sourced from config.defaults.content_type.
+   */
+  defaultContentType?: string;
+  /** SQL test context — only populated for type: sql tests */
+  sqlContext?: SqlScriptContext;
 }
 
 /** Plain-data representation of the context, safe for JSON serialization. */
@@ -89,6 +98,8 @@ export interface SerializedContext {
   vars: SharedVars;
   request: ShogunRequest;
   response: ShogunResponse | null;
+  defaultContentType?: string;
+  sqlContext?: SqlScriptContext;
 }
 
 /**
@@ -101,6 +112,8 @@ export function serializeContext(ctx: ScriptContext): SerializedContext {
     vars: ctx.vars,
     request: ctx.request,
     response: ctx.response ?? null,
+    defaultContentType: ctx.defaultContentType,
+    sqlContext: ctx.sqlContext,
   };
 }
 
@@ -210,6 +223,7 @@ const ctx = {
   vars: __ctxData.vars as Record<string, unknown>,
   request: __ctxData.request as Record<string, unknown>,
   response: __ctxData.response as Record<string, unknown> | null,
+  sql: __ctxData.sqlContext as Record<string, unknown> | undefined,
   scripts: { ${scriptNames} },
 
   assert(condition: boolean, message: string): void {
@@ -248,7 +262,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   const baseUrl = ctx.env.BASE_URL ?? '';
   const url = path.startsWith('http') ? path : baseUrl + path;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    'Content-Type': ctx.defaultContentType ?? 'application/json',
     Accept: 'application/json',
   };
   if (ctx.env.AUTH_TOKEN) {
@@ -280,7 +294,33 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   });
   const text = await res.text();
   let parsed: unknown = text;
-  try { parsed = JSON.parse(text); } catch { /* keep string */ }
+  let events: { event: string; data: unknown }[] | undefined;
+  const respHeaders = Object.fromEntries(res.headers.entries());
+  const respCt = (respHeaders['content-type'] ?? respHeaders['Content-Type'] ?? '') as string;
+  if (respCt.toLowerCase().includes('text/event-stream')) {
+    // SSE auto-parsing
+    const sseBlocks = text.split(/\\r?\\n\\r?\\n/);
+    const sseEvents: { event: string; data: unknown }[] = [];
+    for (const block of sseBlocks) {
+      if (!block.trim()) continue;
+      let evt = 'message';
+      const dataLines: string[] = [];
+      for (const line of block.split(/\\r?\\n/)) {
+        if (line.startsWith('event:')) evt = line.slice(6).trim();
+        else if (line.startsWith('data:')) { const d = line.slice(5); dataLines.push(d.startsWith(' ') ? d.slice(1) : d); }
+      }
+      if (dataLines.length === 0) continue;
+      const dataStr = dataLines.join('\\n');
+      let data: unknown = dataStr;
+      try { data = JSON.parse(dataStr); } catch { /* keep string */ }
+      sseEvents.push({ event: evt, data });
+    }
+    if (sseEvents.length === 1) parsed = sseEvents[0].data;
+    else if (sseEvents.length > 1) parsed = sseEvents[sseEvents.length - 1].data;
+    events = sseEvents;
+  } else {
+    try { parsed = JSON.parse(text); } catch { /* keep string */ }
+  }
 
   // Log status; for non-2xx also dump the response body so failures are self-diagnosable
   ctx.log(\`  <- \${res.status}\`);
@@ -289,7 +329,7 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
     ctx.log(\`  response body: \${snippet}\`);
   }
 
-  return { status: res.status, body: parsed, raw: text, headers: Object.fromEntries(res.headers.entries()), duration: 0 };
+  return { status: res.status, body: parsed, raw: text, headers: respHeaders, duration: 0, events };
 }
 
 // ---- user script ----
@@ -361,6 +401,7 @@ var ctx = {
   vars: __ctxData.vars,
   request: __ctxData.request,
   response: __ctxData.response,
+  sql: __ctxData.sqlContext,
   scripts: { ${scriptNames} },
 
   assert: function(condition, message) {
@@ -389,7 +430,7 @@ async function __httpCall(method, path, body, _opts) {
   var baseUrl = (ctx.env && ctx.env.BASE_URL) ? ctx.env.BASE_URL : '';
   var url = path.startsWith('http') ? path : baseUrl + path;
   var headers = {
-    'Content-Type': 'application/json',
+    'Content-Type': (ctx.defaultContentType || 'application/json'),
     'Accept': 'application/json',
   };
   if (ctx.env && ctx.env.AUTH_TOKEN) {
@@ -421,7 +462,35 @@ async function __httpCall(method, path, body, _opts) {
   });
   var text = await res.text();
   var parsed = text;
-  try { parsed = JSON.parse(text); } catch (e) { /* keep string */ }
+  var events = undefined;
+  var respHeaders = Object.fromEntries(res.headers.entries());
+  var respCt = (respHeaders['content-type'] || respHeaders['Content-Type'] || '');
+  if (respCt.toLowerCase().indexOf('text/event-stream') !== -1) {
+    var sseBlocks = text.split(/\\r?\\n\\r?\\n/);
+    var sseEvents = [];
+    for (var bi = 0; bi < sseBlocks.length; bi++) {
+      var block = sseBlocks[bi];
+      if (!block.trim()) continue;
+      var evt = 'message';
+      var dataLines = [];
+      var blockLines = block.split(/\\r?\\n/);
+      for (var li = 0; li < blockLines.length; li++) {
+        var line = blockLines[li];
+        if (line.indexOf('event:') === 0) { evt = line.slice(6).trim(); }
+        else if (line.indexOf('data:') === 0) { var d = line.slice(5); dataLines.push(d.charAt(0) === ' ' ? d.slice(1) : d); }
+      }
+      if (dataLines.length === 0) continue;
+      var dataStr = dataLines.join('\\n');
+      var dataVal = dataStr;
+      try { dataVal = JSON.parse(dataStr); } catch (e2) { /* keep string */ }
+      sseEvents.push({ event: evt, data: dataVal });
+    }
+    if (sseEvents.length === 1) { parsed = sseEvents[0].data; }
+    else if (sseEvents.length > 1) { parsed = sseEvents[sseEvents.length - 1].data; }
+    events = sseEvents;
+  } else {
+    try { parsed = JSON.parse(text); } catch (e) { /* keep string */ }
+  }
 
   ctx.log('  <- ' + res.status);
   if (res.status < 200 || res.status >= 300) {
@@ -433,8 +502,9 @@ async function __httpCall(method, path, body, _opts) {
     status: res.status,
     body: parsed,
     raw: text,
-    headers: Object.fromEntries(res.headers.entries()),
+    headers: respHeaders,
     duration: 0,
+    events: events,
   };
 }
 

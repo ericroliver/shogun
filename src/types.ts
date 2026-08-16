@@ -29,6 +29,83 @@ export interface RequestDef {
   body?: RequestBody;
 }
 
+export interface RequestDef {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** URL path, may contain ${VAR} tokens */
+  path: string;
+  headers?: Record<string, string>;
+  params?: Record<string, string | number | boolean>;
+  body?: RequestBody;
+}
+
+// ---------------------------------------------------------------------------
+// SQL Testing Types
+// ---------------------------------------------------------------------------
+
+/**
+ * Supported SQL driver types.
+ * v1: mssql only.
+ * Future: postgres (pg), sqlite (better-sqlite3).
+ */
+export type SqlDriverType = 'mssql' | 'postgres' | 'sqlite';
+
+/**
+ * Named database connection configuration for SQL tests.
+ * Defined in shogun.config.yaml under `connections:`.
+ */
+export interface SqlConnectionConfig {
+  /** Database driver — determines which SqlDriver implementation is used */
+  driver: SqlDriverType;
+  /** Connection string with ${VAR} interpolation from env */
+  connectionString: string;
+  /** Query timeout in seconds (optional, defaults to config.defaults.timeout) */
+  timeout?: number;
+}
+
+/**
+ * SQL test configuration within a test definition.
+ */
+export interface SqlTestConfig {
+  /** Named connection from config.connections */
+  connection: string;
+  /** Stored procedure name (required if `query` is not set) */
+  proc?: string;
+  /** Raw SQL query to execute (required if `proc` is not set). Use @paramName for parameter substitution. */
+  query?: string;
+  /** Override name for the baseline file. Defaults to proc name or sanitized test name. */
+  baseline?: string;
+  /** Parameter sets — inline array, file reference, or omitted (provided via --params at runtime) */
+  parameters?:
+    | { inline: Record<string, unknown>[] }
+    | { file: string };
+  /** Output artifact format. Baseline is always JSON. Default: json */
+  outputFormat?: 'json' | 'csv' | 'both';
+  /** Query timeout override (seconds) */
+  timeout?: number;
+  /** Pre-execution script (runs once before all parameter sets) */
+  pre?: string;
+  /** Post-execution script (runs once after all parameter sets) */
+  post?: string;
+}
+
+/**
+ * SQL test context available in pre/post scripts for type: sql tests.
+ */
+export interface SqlScriptContext {
+  /** Number of parameter sets to be executed (available in pre-script) */
+  paramCount: number;
+  /** The parameter sets themselves (available in pre-script) */
+  params: Record<string, unknown>[];
+  /** Results after execution (available in post-script only, undefined in pre) */
+  results?: import('./sql-driver.js').SqlExecResult[];
+  /** The proc name (undefined for query-based tests) */
+  proc?: string;
+  /** The raw SQL query (undefined for proc-based tests) */
+  query?: string;
+  /** The connection name */
+  connection: string;
+}
+
 export interface ResponseDef {
   /** Expected HTTP status code */
   status?: number;
@@ -38,11 +115,21 @@ export interface ResponseDef {
   ignore_fields?: string[];
   /** Array of jq boolean expressions — each must evaluate truthy */
   shape?: string[];
+  /**
+   * SQL diff mode: 'strict' (default) or 'relaxed'.
+   * strict:  any schema or data difference fails the test.
+   * relaxed: extra columns in actual results are ignored; only columns present
+   *          in the baseline are compared. Row count and value changes still fail.
+   * HTTP tests ignore this field.
+   */
+  diff_mode?: 'strict' | 'relaxed';
 }
 
 export interface TestDefinition {
   name: string;
   description?: string;
+  /** Test type: 'http' (default) or 'sql'. Existing YAML files omit this field. */
+  type?: 'http' | 'sql';
   collection?: string;
   tags?: string[];
   /**
@@ -54,12 +141,15 @@ export interface TestDefinition {
   dependsOn?: string[];
   /** Per-test env var overrides (merged on top of loaded .env) */
   env?: EnvVars;
-  /** TypeScript source — runs before curl. May mutate ctx.request. */
+  /** TypeScript source — runs before curl (HTTP) or before all params (SQL) */
   pre?: string;
-  request: RequestDef;
+  /** HTTP request definition. Required for HTTP tests, omitted for SQL tests. */
+  request?: RequestDef;
   response?: ResponseDef;
-  /** TypeScript source — runs after assertions. Has ctx.response. */
+  /** TypeScript source — runs after assertions (HTTP) or after all params (SQL) */
   post?: string;
+  /** SQL test configuration. Used when type is 'sql'. */
+  sql?: SqlTestConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +225,17 @@ export interface ShogunRequest {
   body?: unknown;
 }
 
+/**
+ * A single Server-Sent Event parsed from an SSE response.
+ * Only populated when Content-Type is text/event-stream.
+ */
+export interface SseEvent {
+  /** SSE event type (from `event:` line, default: "message") */
+  event: string;
+  /** Parsed data from `data:` line(s). JSON-parsed if possible, else string. */
+  data: unknown;
+}
+
 export interface ShogunResponse {
   status: number;
   headers: Record<string, string>;
@@ -143,6 +244,12 @@ export interface ShogunResponse {
   duration: number;
   /** Time reported by curl's own %{time_total} (ms) */
   curlMs: number;
+  /**
+   * Parsed SSE events (only set when Content-Type is text/event-stream).
+   * Each entry has `{ event: string, data: unknown }`.
+   * For non-SSE responses, this is undefined.
+   */
+  events?: SseEvent[];
 }
 
 export type HttpMethod = {
@@ -178,9 +285,26 @@ export interface ShogunContext {
   scripts: Record<string, unknown>;
 }
 
-// ---------------------------------------------------------------------------
-// Assertion context (passed to assertion helpers / backends)
-// ---------------------------------------------------------------------------
+export interface ShogunContext {
+  /** Merged env vars: global config + .env file + test-level overrides */
+  env: EnvVars;
+  /** Mutable cross-test variable store — persists for the entire run */
+  vars: Record<string, unknown>;
+  /** Current request — mutable in pre-script */
+  request: ShogunRequest;
+  /** Current response — available in post-script */
+  response: ShogunResponse;
+  /** Throws ShogunAssertionError if condition is false */
+  assert(condition: boolean, message: string): void;
+  /** Write a message to stdout and to the per-test run log */
+  log(message: string): void;
+  /** HTTP helpers for setup/teardown/chaining (does NOT use curl) */
+  http: HttpMethod;
+  /** Shared scripts loaded from scripts/ directory */
+  scripts: Record<string, unknown>;
+  /** SQL test context — only populated for type: sql tests */
+  sql?: SqlScriptContext;
+}
 
 export interface AssertContext {
   test: TestDefinition;
@@ -255,6 +379,16 @@ export interface TestResult {
    * Only populated on failed tests — omitted on passing tests to reduce noise.
    */
   resolvedResponse?: ShogunResponse;
+  /**
+   * Summary of SQL execution results (only for type: sql tests).
+   * Populated on failed SQL tests for diagnostics.
+   */
+  sqlExecSummary?: {
+    totalParams: number;
+    executed: number;
+    errors: number;
+    totalRows: number;
+  };
 }
 
 export interface RunSummary {
@@ -408,6 +542,8 @@ export interface ShogunConfig {
   };
   /** OpenAPI spec source configuration */
   spec?: SpecConfig;
+  /** Named database connections for SQL tests. Optional — HTTP-only repos don't need this. */
+  connections?: Record<string, SqlConnectionConfig>;
   /** Coverage report v2 configuration. All keys optional. */
   coverage?: CoverageConfig;
 }

@@ -14,6 +14,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
+  resolveSqlConnection, loadSqlParameters,
 } from './loader.js';
 import { executeRequest, checkDependencies } from './executor.js';
 import { runAssertions, assertionsAllPassed, writeSnapshot } from './asserter.js';
@@ -21,10 +22,17 @@ import { runScript } from './scripter.js';
 import { RunLogger } from './logger.js';
 import {
   printCollectionHeader, printTestStart, printTestResult, printSummary,
+  printSqlTestDetails,
 } from './reporter.js';
+import { SqlDriverRegistry } from './sql-driver.js';
+import type { SqlExecResult, SqlDriver } from './sql-driver.js';
+import {
+  getSqlBaselinePath, writeSqlBaseline, diffSqlBaseline, writeCsvArtifacts,
+} from './sql-snapshot.js';
 import type {
   ShogunRequest, ShogunResponse, TestResult, TestTimings, EnvVars,
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
+  TestDefinition, SqlConnectionConfig, SqlScriptContext,
 } from './types.js';
 
 export interface RunOptions {
@@ -36,6 +44,8 @@ export interface RunOptions {
   format?: 'pretty' | 'json' | 'tap';
   snapshotMode?: boolean;
   cwd?: string;
+  /** Runtime parameter override for SQL tests — JSON string (e.g. '[{"UserId": 42}]') */
+  params?: string;
 }
 
 export async function runTests(opts: RunOptions): Promise<RunSummary> {
@@ -75,6 +85,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   const sharedOpts: SharedRunOpts = {
     env, vars, baseUrl, config, scriptsDir, cwd, collectionsDir,
     snapshotMode: opts.snapshotMode, session, logger,
+    runtimeParams: parseRuntimeParams(opts.params),
   };
 
   // -------------------------------------------------------------------------
@@ -84,6 +95,9 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   if (opts.file) {
     const result = await runSingleFile(opts.file, sharedOpts);
     logger.recordTest(result, 'file');
+    if (result.sqlExecSummary) {
+      printSqlTestDetails(result);
+    }
     const summary = logger.finalize({ env: envName, startedAt });
     printSummary(summary);
     return summary;
@@ -141,7 +155,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
           error: `Collection setup failed for "${collectionName}"`,
         };
         logger.recordTest(failed, collectionName);
-        printTestStart(test.name, test.request.method, test.request.path);
+        const display = getTestDisplayInfo(test);
+        printTestStart(test.name, display.method, display.path);
         printTestResult(failed);
       }
       continue;
@@ -156,7 +171,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
         continue;
       }
 
-      printTestStart(test.name, test.request.method, test.request.path);
+      const display = getTestDisplayInfo(test);
+      printTestStart(test.name, display.method, display.path);
 
       // Resolve the canonical ID from the actual file path — handles cross-collection
       // refs stored in _failures_ / _debug_ collections where collectionName is the
@@ -199,9 +215,10 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
 
       logger.recordTest(result, collectionName);
       printTestResult(result);
+      if (result.sqlExecSummary) {
+        printSqlTestDetails(result);
+      }
     }
-
-    // Run collection teardown (even on failures), deduped by session
     await ensureCollectionTeardown(collectionName, definition, sharedOpts);
   }
 
@@ -238,6 +255,8 @@ interface SharedRunOpts {
   snapshotMode?: boolean;
   session: SessionState;
   logger: RunLogger;
+  /** Runtime parameter override for SQL tests (parsed JSON array) */
+  runtimeParams?: Record<string, unknown>[];
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +304,7 @@ async function ensureCollectionSetup(
           vars: opts.vars,
           request: dummyRequest,
           scriptsDir: opts.scriptsDir,
+          defaultContentType: opts.config.defaults?.content_type,
         });
         applyVarMutations(opts.vars, result.varMutations);
         if (!result.passed) {
@@ -311,6 +331,7 @@ async function ensureCollectionSetup(
         vars: opts.vars,
         request: dummyRequest,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       if (process.env.SHOGUN_DEBUG) {
         process.stderr.write(`[runner] collection setup result: passed=${result.passed}, error=${result.error ?? 'none'}, varMutations=${JSON.stringify(result.varMutations ?? {}).slice(0, 300)}\n`);
@@ -348,6 +369,7 @@ async function ensureCollectionTeardown(
       vars: opts.vars,
       request: dummyRequest,
       scriptsDir: opts.scriptsDir,
+      defaultContentType: opts.config.defaults?.content_type,
     });
     if (!result.passed) {
       console.warn(`  ${c.yellow}Teardown warning (${collectionName}): ${result.error}${c.reset}`);
@@ -418,7 +440,8 @@ async function resolveDependencies(
 
     // Execute the dependency test
     const depTest = loadTestFile(depFile, opts.env);
-    printTestStart(depTest.name, depTest.request.method, depTest.request.path);
+    const depDisplay = getTestDisplayInfo(depTest);
+    printTestStart(depTest.name, depDisplay.method, depDisplay.path);
 
     const depResult = await runSingleTest(depTest, depFile, {
       ...opts,
@@ -428,6 +451,9 @@ async function resolveDependencies(
 
     opts.logger.recordTest(depResult, depCollection);
     printTestResult(depResult);
+    if (depResult.sqlExecSummary) {
+      printSqlTestDetails(depResult);
+    }
 
     const outcome = depResult.status === 'passed' ? 'passed' : 'failed';
     opts.session.testsRun.set(depId, outcome);
@@ -448,32 +474,51 @@ interface SingleTestOpts extends SharedRunOpts {
   collectionName?: string;
 }
 
+/**
+ * Dispatcher: routes to runHttpTest or runSqlTest based on test type.
+ * If type is absent or 'http', the existing HTTP path runs unchanged.
+ */
 async function runSingleTest(
-  test: {
-    name: string;
-    request: { method: string; path: string };
-    pre?: string;
-    post?: string;
-    response?: unknown;
-    tags?: string[];
-    collection?: string;
-    env?: EnvVars;
-    description?: string;
-  },
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const testType = test.type ?? 'http';
+
+  if (testType === 'sql' && test.sql) {
+    return runSqlTest(test, file, opts);
+  }
+
+  // Existing HTTP path — unchanged
+  return runHttpTest(test, file, opts);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP test execution (existing behavior — unchanged, just renamed)
+// ---------------------------------------------------------------------------
+
+async function runHttpTest(
+  test: TestDefinition,
   file: string,
   opts: SingleTestOpts,
 ): Promise<TestResult> {
   const scriptOutput: string[] = [];
   const startMs = Date.now();
 
+  // Guard: request must be present for HTTP tests (Zod enforces this too)
+  if (!test.request) {
+    return makeFailedResult(test.name, file, startMs, {}, 'request is required for HTTP tests', scriptOutput);
+  }
+
   // Build initial request
+  const req = test.request;
   let request: ShogunRequest = {
-    method: test.request.method,
-    path: test.request.path,
-    url: buildUrl(opts.baseUrl, test.request.path),
-    headers: (test.request as { headers?: Record<string, string> }).headers ?? {},
-    params: normalizeParams((test.request as { params?: Record<string, string | number | boolean> }).params ?? {}),
-    body: (test.request as { body?: unknown }).body,
+    method: req.method,
+    path: req.path,
+    url: buildUrl(opts.baseUrl, req.path),
+    headers: (req as { headers?: Record<string, string> }).headers ?? {},
+    params: normalizeParams((req as { params?: Record<string, string | number | boolean> }).params ?? {}),
+    body: (req as { body?: unknown }).body,
   };
 
   // Pre-script
@@ -489,6 +534,7 @@ async function runSingleTest(
         vars: opts.vars,
         request,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       preMs = Date.now() - preStart;
       if (process.env.SHOGUN_DEBUG) {
@@ -519,6 +565,7 @@ async function runSingleTest(
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
+      contentType: opts.config.defaults?.content_type,
     });
     if (process.env.SHOGUN_DEBUG) {
       process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
@@ -557,6 +604,7 @@ async function runSingleTest(
         request,
         response,
         scriptsDir: opts.scriptsDir,
+        defaultContentType: opts.config.defaults?.content_type,
       });
       postMs = Date.now() - postStart;
       scriptOutput.push(...postResult.logs);
@@ -600,6 +648,240 @@ async function runSingleTest(
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
     // Attach full request + response on failures so the reporter can dump diagnostics
     ...(finalStatus === 'failed' ? { resolvedRequest: request, resolvedResponse: response } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SQL test execution
+// ---------------------------------------------------------------------------
+
+async function runSqlTest(
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const startMs = Date.now();
+  const scriptOutput: string[] = [];
+  const sql = test.sql!;
+
+  // Determine execution mode: proc or query
+  const isQuery = !sql.proc && !!sql.query;
+  const execTarget = isQuery ? sql.query! : sql.proc!;
+
+  // 1. Resolve connection config
+  const connConfig = resolveSqlConnection(sql.connection, opts.config, opts.env);
+  if (!connConfig) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `Connection "${sql.connection}" not found in config.connections`, scriptOutput);
+  }
+
+  // 2. Resolve driver (import mssql driver to register it, then look up)
+  try {
+    await import('./drivers/mssql-driver.js');
+  } catch {
+    // mssql package not installed — will fail at driver lookup with clear error
+  }
+
+  let driver: SqlDriver;
+  try {
+    driver = SqlDriverRegistry.get(connConfig.driver);
+  } catch (err) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `Driver error: ${err}`, scriptOutput);
+  }
+
+  // 3. Load parameter sets (runtime --params override takes precedence)
+  let paramSets: Record<string, unknown>[];
+  if (opts.runtimeParams) {
+    paramSets = opts.runtimeParams;
+  } else if (!sql.parameters) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `No parameters defined — provide 'parameters' in YAML or use --params flag`, scriptOutput);
+  } else {
+    try {
+      paramSets = loadSqlParameters(sql.parameters, file, opts.env);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `Parameter loading failed: ${err}`, scriptOutput);
+    }
+  }
+
+  if (paramSets.length === 0) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `No parameter sets found`, scriptOutput);
+  }
+
+  // 4. Run pre-script (optional — has ctx.sql with paramCount, params, proc/query, connection)
+  if (sql.pre) {
+    const dummyRequest = makeDummyRequest(opts.baseUrl);
+    const sqlContext: SqlScriptContext = {
+      paramCount: paramSets.length,
+      params: paramSets,
+      proc: sql.proc,
+      query: sql.query,
+      connection: sql.connection,
+    };
+    try {
+      const preResult = await runScript(sql.pre, {
+        env: opts.env,
+        vars: opts.vars,
+        request: dummyRequest,
+        scriptsDir: opts.scriptsDir,
+        sqlContext,
+        defaultContentType: opts.config.defaults?.content_type,
+      });
+      scriptOutput.push(...preResult.logs);
+      if (!preResult.passed) {
+        return makeFailedResult(test.name, file, startMs, {},
+          `SQL pre-script failed: ${preResult.error}`, scriptOutput);
+      }
+      applyVarMutations(opts.vars, preResult.varMutations);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `SQL pre-script threw: ${err}`, scriptOutput);
+    }
+  }
+
+  // 5. Execute proc or query for each parameter set
+  const timeout = sql.timeout ?? connConfig.timeout ?? opts.config.defaults?.timeout ?? 30;
+  let results: SqlExecResult[];
+  try {
+    if (isQuery) {
+      results = await driver.executeQueryBatch(connConfig, execTarget, paramSets, timeout);
+    } else {
+      results = await driver.executeBatch(connConfig, execTarget, paramSets, timeout);
+    }
+  } catch (err) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `SQL execution failed: ${err}`, scriptOutput);
+  }
+
+  // 6. Check for execution errors
+  const execErrors = results.filter(r => r.error);
+  if (execErrors.length > 0) {
+    return makeFailedResult(test.name, file, startMs, {},
+      `${execErrors.length} of ${results.length} parameter sets failed to execute: ${execErrors[0].error}`, scriptOutput);
+  }
+
+  // 7. Snapshot capture/diff
+  // For baseline naming: use explicit baseline name, or proc name, or sanitized test name
+  const baselineName = sql.baseline ?? (isQuery ? safeBaselineName(test.name) : sql.proc!);
+  const baselinePath = getSqlBaselinePath(baselineName, opts.config, opts.cwd, opts.collectionName);
+  const ignoreFields = [
+    ...(opts.config.ignore_fields_global ?? []),
+    ...(test.response?.ignore_fields ?? []),
+  ];
+  const diffMode = test.response?.diff_mode ?? 'strict';
+
+  if (opts.snapshotMode) {
+    await writeSqlBaseline(results, baselinePath, ignoreFields);
+    return {
+      name: test.name,
+      file,
+      status: 'passed',
+      durationMs: Date.now() - startMs,
+      assertions: { snapshot: true },
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    };
+  }
+
+  const snapshotResult = diffSqlBaseline(results, baselinePath, ignoreFields, diffMode);
+  if (snapshotResult.needsBaseline) {
+    return {
+      name: test.name,
+      file,
+      status: 'needs_baseline',
+      durationMs: Date.now() - startMs,
+      assertions: {},
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    };
+  }
+
+  // 8. Write CSV artifacts (if requested)
+  if (sql.outputFormat === 'csv' || sql.outputFormat === 'both') {
+    const runDir = opts.logger.runDir;
+    if (runDir) {
+      writeCsvArtifacts(results, runDir, opts.collectionName ?? 'default', baselineName);
+    }
+  }
+
+  // 9. Run post-script (optional — has ctx.sql with results)
+  if (sql.post) {
+    const dummyRequest = makeDummyRequest(opts.baseUrl);
+    const sqlContext: SqlScriptContext = {
+      paramCount: paramSets.length,
+      params: paramSets,
+      results,
+      proc: sql.proc,
+      query: sql.query,
+      connection: sql.connection,
+    };
+    try {
+      const postResult = await runScript(sql.post, {
+        env: opts.env,
+        vars: opts.vars,
+        request: dummyRequest,
+        scriptsDir: opts.scriptsDir,
+        sqlContext,
+        defaultContentType: opts.config.defaults?.content_type,
+      });
+      scriptOutput.push(...postResult.logs);
+      applyVarMutations(opts.vars, postResult.varMutations);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `SQL post-script threw: ${err}`, scriptOutput);
+    }
+  }
+
+  // 10. Return result — one TestResult per SQL test
+  const durationMs = Date.now() - startMs;
+  const passed = snapshotResult.passed;
+  const totalRows = results.reduce((sum, r) =>
+    sum + r.resultSets.reduce((s, rs) => s + rs.rows.length, 0), 0);
+
+  // Always include sqlExecSummary — useful for Playwright and other integrations
+  const sqlExecSummary = {
+    totalParams: results.length,
+    executed: results.length,
+    errors: execErrors.length,
+    totalRows,
+  };
+
+  return {
+    name: test.name,
+    file,
+    status: passed ? 'passed' : 'failed',
+    durationMs,
+    assertions: {
+      snapshot: passed,
+      snapshotDiff: snapshotResult.diff ?? null,
+    },
+    scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    sqlExecSummary,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test display helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the method and path to display for a test, handling SQL tests
+ * which don't have a `request` field.
+ */
+function getTestDisplayInfo(test: TestDefinition): { method: string; path: string } {
+  if (test.type === 'sql' && test.sql) {
+    if (test.sql.query) {
+      // Show a truncated version of the query
+      const q = test.sql.query.replace(/\s+/g, ' ').trim();
+      const truncated = q.length > 60 ? q.slice(0, 57) + '...' : q;
+      return { method: 'SQL-QUERY', path: truncated };
+    }
+    return { method: 'SQL', path: test.sql.proc ?? '(unknown proc)' };
+  }
+  return {
+    method: test.request?.method ?? 'GET',
+    path: test.request?.path ?? '/',
   };
 }
 
@@ -748,6 +1030,32 @@ export function makeDummyRequest(baseUrl: string): ShogunRequest {
     headers: {},
     params: {},
   };
+}
+
+/** Sanitize a test name into a safe filename for baseline files. */
+function safeBaselineName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * Parse the --params CLI flag (JSON string) into an array of parameter sets.
+ * Returns undefined if the flag was not provided or is invalid.
+ * On invalid JSON, throws with a clear error message.
+ */
+function parseRuntimeParams(params?: string): Record<string, unknown>[] | undefined {
+  if (!params) return undefined;
+  try {
+    const parsed = JSON.parse(params);
+    if (!Array.isArray(parsed)) {
+      throw new Error('--params must be a JSON array of objects, e.g. \'[{"UserId": 42}]\'');
+    }
+    return parsed as Record<string, unknown>[];
+  } catch (err) {
+    throw new Error(`Invalid --params JSON: ${err}. Expected format: '[{"paramName": "value"}]'`);
+  }
 }
 
 export function makeFailedResult(

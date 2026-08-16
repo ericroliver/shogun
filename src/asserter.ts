@@ -28,6 +28,7 @@ import { getActiveBackend } from './backend-global.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { sanitizeName } from './loader.js';
+import { getAssertionBody } from './sse.js';
 
 // ---------------------------------------------------------------------------
 // Main entry point — runs all assertions for a test
@@ -43,8 +44,10 @@ export async function runAssertions(ctx: AssertContext): Promise<AssertionResult
   }
 
   // 2. Shape assertions (jq for Unix, PowerShell for PowerShell)
+  // For SSE responses, use the parsed body (JSON from data: line) instead of raw text.
   if (ctx.test.response?.shape?.length) {
-    results.shape = await backend.runShapeAssertions(ctx.response.raw, ctx.test.response.shape);
+    const assertBody = getAssertionBody(ctx.response);
+    results.shape = await backend.runShapeAssertions(assertBody, ctx.test.response.shape);
   }
 
   // 3. Snapshot (normalize + diff)
@@ -80,10 +83,11 @@ async function runSnapshotAssertion(
   backend: BackendExecutor,
 ): Promise<SnapshotResult> {
   const expectedPath = getExpectedPath(ctx);
+  const assertBody = getAssertionBody(ctx.response);
 
   // Snapshot mode: capture baselines
   if ((ctx as any).snapshotMode) {
-    await writeSnapshot(ctx.response.raw, ctx.test, ctx.config, expectedPath, backend);
+    await writeSnapshot(assertBody, ctx.test, ctx.config, expectedPath, backend);
     return { passed: true };
   }
 
@@ -97,7 +101,7 @@ async function runSnapshotAssertion(
     ...(ctx.test.response?.ignore_fields ?? []),
   ];
 
-  const normalizedActual = await backend.normalizeJson(ctx.response.raw, ignoreFields);
+  const normalizedActual = await backend.normalizeJson(assertBody, ignoreFields);
   const expectedRaw = readFileSync(expectedPath, 'utf8');
   const normalizedExpected = await backend.normalizeJson(expectedRaw, ignoreFields);
 
@@ -148,7 +152,7 @@ export function getExpectedPathFromTest(
 ): string {
   const expectedDir = join(cwd, config.paths?.expected ?? 'expected');
   const collection = collectionName ?? test.collection ?? 'default';
-  const safeName = sanitizeName(test.request.method, test.request.path);
+  const safeName = sanitizeName(test.request?.method ?? 'GET', test.request?.path ?? '/');
   return join(expectedDir, collection, `${safeName}.json`);
 }
 

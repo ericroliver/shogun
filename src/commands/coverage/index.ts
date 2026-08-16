@@ -13,6 +13,21 @@ import {
   fetchSpec,
   resolveCoverageConfig,
 } from '../../loader.js';
+import { collectSqlTestEntries } from './sql-collector.js';
+import {
+  groupByProc,
+  joinRunResultsToSqlTests,
+  buildSqlCoverageSummary,
+  mergeLiveGaps,
+} from './sql-analyzer.js';
+import {
+  compareTestedVsDatabase,
+  collectLiveGaps,
+  buildParamCoverage,
+} from './sql-live-analyzer.js';
+import { renderSqlPretty } from './reporter/sql-pretty.js';
+import { renderSqlJson } from './reporter/sql-json.js';
+import { renderSqlMarkdown } from './reporter/sql-markdown.js';
 import type { ShogunConfig, RunSummary } from '../../types.js';
 import type {
   OpenApiSpec,
@@ -70,7 +85,7 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
     config = { version: 1 as const };
   }
 
-  // 2. Load env (optional — needed when spec is a live relative URL)
+  // 2. Load env (optional — needed when spec is a live relative URL or SQL param files)
   let env: Record<string, string> = {};
   const envName = args.env ?? config.defaults?.env;
   if (envName) {
@@ -79,6 +94,11 @@ export async function coverage(args: import('./types.js').CoverageArgs): Promise
     } catch {
       // swallow — env may not be needed if spec is a local file or full URL
     }
+  }
+
+  // 2b. SQL coverage mode — bypasses HTTP spec-based coverage entirely
+  if (args.sql) {
+    return runSqlCoverage(args, config, env, cwd);
   }
 
   // 3. Fetch + parse spec
@@ -544,4 +564,142 @@ function renderPrettyStr(
     console.log = origLog;
   }
   return lines.join('\n') + '\n';
+}
+
+// ---------------------------------------------------------------------------
+// SQL stored procedure coverage mode (--sql flag)
+// ---------------------------------------------------------------------------
+
+async function runSqlCoverage(
+  args: import('./types.js').CoverageArgs,
+  config: ShogunConfig,
+  env: Record<string, string>,
+  cwd: string,
+): Promise<number> {
+  // 1. Collect SQL test entries from YAML
+  let sqlEntries: import('./types.js').SqlTestEntry[];
+  try {
+    sqlEntries = await collectSqlTestEntries(
+      config, cwd, args.collection, args.suite, env,
+    );
+  } catch (err) {
+    console.error(`Error scanning SQL tests: ${(err as Error).message}`);
+    return 1;
+  }
+
+  if (sqlEntries.length === 0) {
+    console.error('No SQL test files found.');
+    console.error('');
+    console.error('SQL tests require `type: sql` in the test YAML and a `sql:` block');
+    console.error('with `connection` and `proc` fields. See docs/technical/sql-proc-testing-design.md');
+    return 1;
+  }
+
+  // 2. Load run results if requested (--last-run or --run)
+  let runSummary: RunSummary | null = null;
+  const coverageConfig = resolveCoverageConfig(config);
+
+  if (args.lastRun || args.runId) {
+    runSummary = loadRunForCoverage(
+      { lastRun: args.lastRun, runId: args.runId, suite: args.suite },
+      { defaultSuite: coverageConfig.defaultSuite },
+      config,
+      cwd,
+    );
+
+    if (runSummary) {
+      joinRunResultsToSqlTests(sqlEntries, runSummary);
+    }
+  }
+
+  const hasRunData = sqlEntries.some(e => e.runResult !== undefined);
+
+  // 3. Build proc coverage matrix
+  const procs = groupByProc(sqlEntries);
+
+  // 3b. Live DB introspection (--live flag)
+  let liveSummary: import('./types.js').SqlCoverageSummary | null = null;
+  const allUntestedProcs: import('./types.js').SqlUntestedProc[] = [];
+
+  if (args.live && config.connections) {
+    // Import driver registry + connection resolver (lazy — only for --live)
+    const { SqlDriverRegistry } = await import('../../sql-driver.js');
+    // Import the MSSQL driver so it registers itself
+    await import('../../drivers/mssql-driver.js');
+    const { resolveSqlConnection } = await import('../../loader.js');
+
+    // Get distinct connections used by SQL tests
+    const testedConnections = [...new Set(procs.map(p => p.connection))];
+
+    for (const connName of testedConnections) {
+      const connConfig = resolveSqlConnection(connName, config, env);
+      if (!connConfig) {
+        console.error(`Warning: connection "${connName}" not found in config — skipping live introspection for this connection.`);
+        continue;
+      }
+
+      try {
+        // Get the driver and introspect
+        const driver = SqlDriverRegistry.get(connConfig.driver);
+        const timeout = connConfig.timeout ?? 30;
+        const dbProcs = await driver.listProcedures(connConfig, timeout);
+
+        // Compare tested vs database
+        const untested = compareTestedVsDatabase(procs, dbProcs, connName);
+        allUntestedProcs.push(...untested);
+      } catch (err) {
+        console.error(`Warning: live introspection failed for connection "${connName}": ${(err as Error).message}`);
+      }
+    }
+
+    // Collect live gaps
+    const liveGaps = collectLiveGaps(procs, allUntestedProcs);
+
+    // Build param coverage matrix
+    const paramCoverage = buildParamCoverage(procs);
+
+    // Build base summary first, then extend with live data
+    const baseSummary = buildSqlCoverageSummary(sqlEntries, procs, hasRunData);
+
+    // Merge live gaps into static gaps
+    liveSummary = mergeLiveGaps(baseSummary, liveGaps);
+
+    // Add live introspection fields
+    liveSummary.dbTotalProcs = allUntestedProcs.length + procs.filter(p => p.inDatabase === true).length;
+    liveSummary.dbTestedProcs = procs.filter(p => p.inDatabase === true).length;
+    liveSummary.dbUntestedProcs = allUntestedProcs.length;
+    liveSummary.untestedProcs = allUntestedProcs;
+    liveSummary.paramCoverage = paramCoverage;
+    liveSummary.hasLiveData = true;
+  }
+
+  // 4. Build summary (use live summary if available, otherwise static)
+  const sqlSummary = liveSummary ?? buildSqlCoverageSummary(sqlEntries, procs, hasRunData);
+
+  // 5. Render
+  const format = args.format ?? 'pretty';
+  const detail = args.detail ?? false;
+
+  if (format === 'json') {
+    const jsonOutput = renderSqlJson(sqlSummary, procs);
+    writeOutput(jsonOutput, args.out);
+  } else if (format === 'markdown') {
+    const mdOutput = renderSqlMarkdown(sqlSummary, procs, detail);
+    writeOutput(mdOutput, args.out);
+  } else {
+    const prettyOutput = renderSqlPretty(sqlSummary, procs, detail, runSummary);
+    writeOutput(prettyOutput, args.out);
+  }
+
+  // 6. Threshold check (optional — use --min-coverage for baseline coverage)
+  if (args.minCoverage !== undefined && sqlSummary.totalProcs > 0) {
+    const baselinePct = Math.round((sqlSummary.baselinedProcs / sqlSummary.totalProcs) * 1000) / 10;
+    if (baselinePct < args.minCoverage) {
+      console.error(`Coverage threshold violation:`);
+      console.error(`  ✗ baseline coverage: ${baselinePct}% < ${args.minCoverage}% (required by --min-coverage)`);
+      return 1;
+    }
+  }
+
+  return 0;
 }
