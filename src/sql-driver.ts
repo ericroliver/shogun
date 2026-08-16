@@ -24,6 +24,53 @@ export interface SqlResultSet {
   rows: Record<string, unknown>[];
 }
 
+// ---------------------------------------------------------------------------
+// Introspection types (Phase 2 — live DB introspection)
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadata about a single parameter of a stored procedure, as discovered
+ * from the database catalog (e.g. sys.parameters in MSSQL).
+ */
+export interface SqlParamMetadata {
+  /** Parameter name (without @ prefix on MSSQL) */
+  name: string;
+  /** SQL data type name, e.g. "int", "nvarchar", "bit", "decimal" */
+  dataType: string;
+  /** Maximum length for string types (null for non-string types) */
+  maxLength?: number | null;
+  /** Precision for numeric types */
+  precision?: number | null;
+  /** Scale for numeric types */
+  scale?: number | null;
+  /** True if this is an OUTPUT parameter */
+  isOutput: boolean;
+  /** True if the parameter has a default value */
+  hasDefault: boolean;
+  /** The default value (string representation, if available) */
+  defaultValue?: string | null;
+  /** Ordinal position (1-based on MSSQL) */
+  ordinal: number;
+}
+
+/**
+ * Metadata about a stored procedure, as discovered from the database catalog.
+ */
+export interface SqlProcMetadata {
+  /** Schema name (e.g. "dbo") */
+  schema: string;
+  /** Procedure name (without schema prefix) */
+  name: string;
+  /** Fully-qualified name: "schema.name" */
+  qualifiedName: string;
+  /** Parameters in ordinal order */
+  parameters: SqlParamMetadata[];
+  /** Creation date (ISO string, if available) */
+  createDate?: string | null;
+  /** Last modified date (ISO string, if available) */
+  modifyDate?: string | null;
+}
+
 /**
  * Result of executing a stored procedure with one parameter set.
  */
@@ -42,6 +89,31 @@ export interface SqlExecResult {
   durationMs: number;
   /** Error if execution failed */
   error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Dependency types (Phase 3 — source + dependency introspection)
+// ---------------------------------------------------------------------------
+
+/**
+ * A database object that a stored procedure depends on (references).
+ * Used by `shogun sql --deps` to show the blast radius of a proc.
+ */
+export interface SqlDependency {
+  /** Schema of the referenced object */
+  schema: string;
+  /** Name of the referenced object */
+  name: string;
+  /** Fully-qualified name: "schema.name" */
+  qualifiedName: string;
+  /** Object type: TABLE, VIEW, PROCEDURE, FUNCTION, etc. */
+  type: string;
+  /** How the proc references this object: SELECT, INSERT, UPDATE, DELETE, EXECUTE, etc. */
+  referenceType: string;
+  /** True if the referenced object is in a different database */
+  isCrossDatabase: boolean;
+  /** True if the referenced object name could not be resolved (deferred name resolution) */
+  isUnresolved: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,8 +153,62 @@ export interface SqlDriver {
     timeout: number,
   ): Promise<SqlExecResult[]>;
 
+  /**
+   * Execute a raw SQL query with the given parameters.
+   * Parameters are bound as @paramName in the query string.
+   * Opens a connection, executes, captures results, closes connection.
+   */
+  executeQuery(
+    connection: SqlConnectionConfig,
+    query: string,
+    params: Record<string, unknown>,
+    timeout: number,
+  ): Promise<SqlExecResult>;
+
+  /**
+   * Execute a raw SQL query across N parameter sets using a shared connection pool.
+   * Each result's paramIndex is set to its position in the array.
+   */
+  executeQueryBatch(
+    connection: SqlConnectionConfig,
+    query: string,
+    paramSets: Record<string, unknown>[],
+    timeout: number,
+  ): Promise<SqlExecResult[]>;
+
   /** Health check: verify driver dependencies are available */
   checkDependencies(): Promise<{ name: string; found: boolean; optional: boolean }[]>;
+
+  /**
+   * List all stored procedures in the database with their parameters.
+   * Used for live coverage introspection (Phase 2).
+   * Returns procs sorted by schema + name.
+   */
+  listProcedures(
+    connection: SqlConnectionConfig,
+    timeout: number,
+  ): Promise<SqlProcMetadata[]>;
+
+  /**
+   * Retrieve the source definition (body) of a stored procedure.
+   * On MSSQL: queries sys.sql_modules.definition.
+   * Returns null if the proc is not found.
+   */
+  getProcSource(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<string | null>;
+
+  /**
+   * Retrieve the objects a proc depends on (tables, views, other procs, etc.).
+   * On MSSQL: queries sys.sql_expression_dependencies.
+   */
+  getProcDependencies(
+    connection: SqlConnectionConfig,
+    proc: string,
+    timeout: number,
+  ): Promise<SqlDependency[]>;
 }
 
 // ---------------------------------------------------------------------------

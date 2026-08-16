@@ -21,17 +21,20 @@ import type { SqlExecResult } from './sql-driver.js';
 
 /**
  * Resolve the baseline file path for a SQL test.
- * Format: expected/{collection}/sql_{procName}.json
+ * Format: expected/{collection}/sql_{name}.json
+ *
+ * For proc tests: name is the proc name (e.g. "dbo.sp_GetUser").
+ * For query tests: name is the baseline override, or a sanitized version of the test name.
  */
 export function getSqlBaselinePath(
-  procName: string,
+  name: string,
   config: ShogunConfig,
   cwd: string,
   collectionName?: string,
 ): string {
   const expectedDir = join(cwd, config.paths?.expected ?? 'expected');
   const collection = collectionName ?? 'default';
-  return join(expectedDir, collection, `sql_${procName}.json`);
+  return join(expectedDir, collection, `sql_${name}.json`);
 }
 
 // ---------------------------------------------------------------------------

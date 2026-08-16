@@ -44,6 +44,8 @@ export interface RunOptions {
   format?: 'pretty' | 'json' | 'tap';
   snapshotMode?: boolean;
   cwd?: string;
+  /** Runtime parameter override for SQL tests — JSON string (e.g. '[{"UserId": 42}]') */
+  params?: string;
 }
 
 export async function runTests(opts: RunOptions): Promise<RunSummary> {
@@ -83,6 +85,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   const sharedOpts: SharedRunOpts = {
     env, vars, baseUrl, config, scriptsDir, cwd, collectionsDir,
     snapshotMode: opts.snapshotMode, session, logger,
+    runtimeParams: parseRuntimeParams(opts.params),
   };
 
   // -------------------------------------------------------------------------
@@ -252,6 +255,8 @@ interface SharedRunOpts {
   snapshotMode?: boolean;
   session: SessionState;
   logger: RunLogger;
+  /** Runtime parameter override for SQL tests (parsed JSON array) */
+  runtimeParams?: Record<string, unknown>[];
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +664,10 @@ async function runSqlTest(
   const scriptOutput: string[] = [];
   const sql = test.sql!;
 
+  // Determine execution mode: proc or query
+  const isQuery = !sql.proc && !!sql.query;
+  const execTarget = isQuery ? sql.query! : sql.proc!;
+
   // 1. Resolve connection config
   const connConfig = resolveSqlConnection(sql.connection, opts.config, opts.env);
   if (!connConfig) {
@@ -681,13 +690,20 @@ async function runSqlTest(
       `Driver error: ${err}`, scriptOutput);
   }
 
-  // 3. Load parameter sets
+  // 3. Load parameter sets (runtime --params override takes precedence)
   let paramSets: Record<string, unknown>[];
-  try {
-    paramSets = loadSqlParameters(sql.parameters, file, opts.env);
-  } catch (err) {
+  if (opts.runtimeParams) {
+    paramSets = opts.runtimeParams;
+  } else if (!sql.parameters) {
     return makeFailedResult(test.name, file, startMs, {},
-      `Parameter loading failed: ${err}`, scriptOutput);
+      `No parameters defined — provide 'parameters' in YAML or use --params flag`, scriptOutput);
+  } else {
+    try {
+      paramSets = loadSqlParameters(sql.parameters, file, opts.env);
+    } catch (err) {
+      return makeFailedResult(test.name, file, startMs, {},
+        `Parameter loading failed: ${err}`, scriptOutput);
+    }
   }
 
   if (paramSets.length === 0) {
@@ -695,13 +711,14 @@ async function runSqlTest(
       `No parameter sets found`, scriptOutput);
   }
 
-  // 4. Run pre-script (optional — has ctx.sql with paramCount, params, proc, connection)
+  // 4. Run pre-script (optional — has ctx.sql with paramCount, params, proc/query, connection)
   if (sql.pre) {
     const dummyRequest = makeDummyRequest(opts.baseUrl);
     const sqlContext: SqlScriptContext = {
       paramCount: paramSets.length,
       params: paramSets,
       proc: sql.proc,
+      query: sql.query,
       connection: sql.connection,
     };
     try {
@@ -725,11 +742,15 @@ async function runSqlTest(
     }
   }
 
-  // 5. Execute proc for each parameter set
+  // 5. Execute proc or query for each parameter set
   const timeout = sql.timeout ?? connConfig.timeout ?? opts.config.defaults?.timeout ?? 30;
   let results: SqlExecResult[];
   try {
-    results = await driver.executeBatch(connConfig, sql.proc, paramSets, timeout);
+    if (isQuery) {
+      results = await driver.executeQueryBatch(connConfig, execTarget, paramSets, timeout);
+    } else {
+      results = await driver.executeBatch(connConfig, execTarget, paramSets, timeout);
+    }
   } catch (err) {
     return makeFailedResult(test.name, file, startMs, {},
       `SQL execution failed: ${err}`, scriptOutput);
@@ -743,7 +764,9 @@ async function runSqlTest(
   }
 
   // 7. Snapshot capture/diff
-  const baselinePath = getSqlBaselinePath(sql.proc, opts.config, opts.cwd, opts.collectionName);
+  // For baseline naming: use explicit baseline name, or proc name, or sanitized test name
+  const baselineName = sql.baseline ?? (isQuery ? safeBaselineName(test.name) : sql.proc!);
+  const baselinePath = getSqlBaselinePath(baselineName, opts.config, opts.cwd, opts.collectionName);
   const ignoreFields = [
     ...(opts.config.ignore_fields_global ?? []),
     ...(test.response?.ignore_fields ?? []),
@@ -778,7 +801,7 @@ async function runSqlTest(
   if (sql.outputFormat === 'csv' || sql.outputFormat === 'both') {
     const runDir = opts.logger.runDir;
     if (runDir) {
-      writeCsvArtifacts(results, runDir, opts.collectionName ?? 'default', sql.proc);
+      writeCsvArtifacts(results, runDir, opts.collectionName ?? 'default', baselineName);
     }
   }
 
@@ -790,6 +813,7 @@ async function runSqlTest(
       params: paramSets,
       results,
       proc: sql.proc,
+      query: sql.query,
       connection: sql.connection,
     };
     try {
@@ -815,6 +839,14 @@ async function runSqlTest(
   const totalRows = results.reduce((sum, r) =>
     sum + r.resultSets.reduce((s, rs) => s + rs.rows.length, 0), 0);
 
+  // Always include sqlExecSummary — useful for Playwright and other integrations
+  const sqlExecSummary = {
+    totalParams: results.length,
+    executed: results.length,
+    errors: execErrors.length,
+    totalRows,
+  };
+
   return {
     name: test.name,
     file,
@@ -825,15 +857,7 @@ async function runSqlTest(
       snapshotDiff: snapshotResult.diff ?? null,
     },
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    // On failure, attach SQL exec summary for diagnostics
-    ...(passed ? {} : {
-      sqlExecSummary: {
-        totalParams: results.length,
-        executed: results.length,
-        errors: execErrors.length,
-        totalRows,
-      },
-    }),
+    sqlExecSummary,
   };
 }
 
@@ -847,7 +871,13 @@ async function runSqlTest(
  */
 function getTestDisplayInfo(test: TestDefinition): { method: string; path: string } {
   if (test.type === 'sql' && test.sql) {
-    return { method: 'SQL', path: test.sql.proc };
+    if (test.sql.query) {
+      // Show a truncated version of the query
+      const q = test.sql.query.replace(/\s+/g, ' ').trim();
+      const truncated = q.length > 60 ? q.slice(0, 57) + '...' : q;
+      return { method: 'SQL-QUERY', path: truncated };
+    }
+    return { method: 'SQL', path: test.sql.proc ?? '(unknown proc)' };
   }
   return {
     method: test.request?.method ?? 'GET',
@@ -1000,6 +1030,32 @@ export function makeDummyRequest(baseUrl: string): ShogunRequest {
     headers: {},
     params: {},
   };
+}
+
+/** Sanitize a test name into a safe filename for baseline files. */
+function safeBaselineName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * Parse the --params CLI flag (JSON string) into an array of parameter sets.
+ * Returns undefined if the flag was not provided or is invalid.
+ * On invalid JSON, throws with a clear error message.
+ */
+function parseRuntimeParams(params?: string): Record<string, unknown>[] | undefined {
+  if (!params) return undefined;
+  try {
+    const parsed = JSON.parse(params);
+    if (!Array.isArray(parsed)) {
+      throw new Error('--params must be a JSON array of objects, e.g. \'[{"UserId": 42}]\'');
+    }
+    return parsed as Record<string, unknown>[];
+  } catch (err) {
+    throw new Error(`Invalid --params JSON: ${err}. Expected format: '[{"paramName": "value"}]'`);
+  }
 }
 
 export function makeFailedResult(
