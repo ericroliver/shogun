@@ -33,8 +33,10 @@ import type {
   ShogunRequest, ShogunResponse, TestResult, TestTimings, EnvVars,
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
   TestDefinition, SqlConnectionConfig, SqlScriptContext,
-  AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig,
+  AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig, EvaluatorResponse,
 } from './types.js';
+import { buildEvaluationPrompt, parseEvaluatorResponse } from './agent-evaluator.js';
+import { resolveEvaluationConfig } from './loader.js';
 
 export interface RunOptions {
   env?: string;
@@ -988,35 +990,198 @@ export async function runAgentTest(
     };
   }
 
-  // --- 5. Hand off to evaluation ---
-  // The evaluation phase is implemented in Story 4.
-  // For now, we return a placeholder result that includes the agent output.
-  // Story 4 will replace this with the full evaluation flow.
+  // --- 5. Resolve evaluation config ---
+  const evalConfig = resolveEvaluationConfig(test.evaluate, opts.config, opts.env);
 
-  // TODO: Story 4 — call evaluateAgentResponse() here
-  // TODO: Story 5 — validate evaluator response, apply min_pass, produce EvaluationAssertionResult
+  // --- 6. Send to evaluator ---
+  const evalResult = await evaluateAgentResponse({
+    agentOutput,
+    expected: test.expected,
+    evaluate: test.evaluate,
+    evalConfig,
+    env: opts.env,
+  });
 
+  const assertMs = evalResult.durationMs;
+
+  // --- 7. Handle evaluation errors ---
+  if (evalResult.evaluationError) {
+    return {
+      name: test.name,
+      file,
+      status: 'failed',
+      durationMs: Date.now() - startMs,
+      timings: {
+        curlMs,
+        assertMs,
+        preMs: 0,
+        postMs: 0,
+        otherMs: Math.max(0, Date.now() - startMs - curlMs - assertMs),
+      },
+      assertions: {},
+      error: evalResult.evaluationError,
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    };
+  }
+
+  // --- 8. Hand off to contract validation (Story 5) ---
+  // TODO: Story 5 — validate EvaluatorResponse, apply min_pass, produce EvaluationAssertionResult
+  // For now, evaluation succeeded but we have no pass/fail determination yet.
   const durationMs = Date.now() - startMs;
-  const timings: TestTimings = {
+  const finalTimings: TestTimings = {
     curlMs,
-    assertMs: 0,  // will be filled by evaluation (Story 4/5)
+    assertMs,
     preMs: 0,
     postMs: 0,
-    otherMs: Math.max(0, durationMs - curlMs),
+    otherMs: Math.max(0, durationMs - curlMs - assertMs),
   };
 
   return {
     name: test.name,
     file,
-    status: 'failed',  // placeholder until evaluation is implemented
+    status: 'failed',  // placeholder until Story 5 applies min_pass threshold
     durationMs,
-    timings,
+    timings: finalTimings,
     assertions: {},
-    error: 'Agent test runner implemented; evaluation not yet wired (Story 4)',
+    error: 'Evaluation transport succeeded; contract validation not yet implemented (Story 5)',
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
     agentResponse: response,
     resolvedRequest: request,
+    evaluationRequest: evalResult.evaluationRequest,
+    evaluationResponse: evalResult.evaluationResponse ?? undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Agent evaluation transport
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends the agent output to the evaluator and returns the raw evaluator response
+ * plus the evaluation request. Does NOT validate the evaluator's contract —
+ * that is Story 5's job.
+ *
+ * Returns:
+ *   - evaluatorResponse: the parsed EvaluatorResponse (if parsing succeeded)
+ *   - evaluationError: error message (if parsing or HTTP failed)
+ *   - evaluationRequest: the ShogunRequest sent to the evaluator
+ *   - evaluationResponse: the raw ShogunResponse from the evaluator
+ *   - durationMs: time for the evaluation HTTP call + parsing
+ */
+async function evaluateAgentResponse(args: {
+  agentOutput: string;
+  expected: AgentExpectedDef | undefined;
+  evaluate: AgentEvaluateConfig | undefined;
+  evalConfig: { endpoint: string; model: string; api_key?: string; temperature: number; evaluator_system_prompt?: string };
+  env: EnvVars;
+}): Promise<{
+  evaluatorResponse: EvaluatorResponse | null;
+  evaluationError: string | null;
+  evaluationRequest: ShogunRequest;
+  evaluationResponse: ShogunResponse | null;
+  durationMs: number;
+}> {
+  const startMs = Date.now();
+
+  // Build evaluation messages
+  const messages = buildEvaluationPrompt({
+    expected: args.expected,
+    evaluate: args.evaluate,
+    agentOutput: args.agentOutput,
+    evaluatorSystemPrompt: args.evalConfig.evaluator_system_prompt,
+  });
+
+  // Build request body
+  const requestBody = {
+    model: args.evalConfig.model,
+    temperature: args.evalConfig.temperature,
+    messages,
+  };
+
+  // Build ShogunRequest
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (args.evalConfig.api_key) {
+    headers['Authorization'] = `Bearer ${args.evalConfig.api_key}`;
+  }
+
+  const evaluationRequest: ShogunRequest = {
+    method: 'POST',
+    path: args.evalConfig.endpoint,
+    url: args.evalConfig.endpoint,
+    headers,
+    params: {},
+    body: JSON.stringify(requestBody),
+  };
+
+  // Execute
+  let evaluationResponse: ShogunResponse;
+  try {
+    evaluationResponse = await executeRequest(evaluationRequest, args.env, {
+      timeout: 300,
+      autoInjectAuth: false,  // Constraint 3
+      contentType: 'application/json',
+    });
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: `Evaluator HTTP request failed: ${err}`,
+      evaluationRequest,
+      evaluationResponse: null,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  // Extract content from evaluator response
+  let rawContent: string;
+  try {
+    const body = typeof evaluationResponse.body === 'string'
+      ? JSON.parse(evaluationResponse.body)
+      : evaluationResponse.body;
+    rawContent = body?.choices?.[0]?.message?.content;
+    if (typeof rawContent !== 'string' || !rawContent.trim()) {
+      return {
+        evaluatorResponse: null,
+        evaluationError: 'Evaluator response missing choices[0].message.content or content is empty.',
+        evaluationRequest,
+        evaluationResponse,
+        durationMs: Date.now() - startMs,
+      };
+    }
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: `Failed to parse evaluator HTTP response: ${err}`,
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  // Parse strict JSON
+  try {
+    const evaluatorResponse = parseEvaluatorResponse(rawContent);
+    return {
+      evaluatorResponse,
+      evaluationError: null,
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: String(err),
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

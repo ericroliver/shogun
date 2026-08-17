@@ -39,6 +39,10 @@ interface MockBackendConfig {
   response?: ShogunResponse;
   /** Error to throw from executeRequest */
   error?: Error;
+  /** Second response (for evaluator calls). Falls back to `response` if not set. */
+  secondResponse?: ShogunResponse;
+  /** Error to throw on the second (evaluator) call */
+  secondError?: Error;
 }
 
 interface CapturedCall {
@@ -54,10 +58,18 @@ const mockBackend: BackendExecutor = {
   name: 'unix',
   async executeRequest(req: ShogunRequest, env: EnvVars, opts?: ExecutorOptions): Promise<ShogunResponse> {
     capturedCalls.push({ req, env, opts });
-    if (mockConfig.error) {
-      throw mockConfig.error;
+    const callIndex = capturedCalls.length - 1;
+    if (callIndex === 0) {
+      if (mockConfig.error) {
+        throw mockConfig.error;
+      }
+      return mockConfig.response!;
     }
-    return mockConfig.response!;
+    // Second call (evaluator)
+    if (mockConfig.secondError) {
+      throw mockConfig.secondError;
+    }
+    return mockConfig.secondResponse ?? mockConfig.response!;
   },
   async runJsonQuery() { return { passed: true }; },
   async runShapeAssertions() { return []; },
@@ -106,10 +118,27 @@ function makeOpenAiResponse(content: string): ShogunResponse {
   });
 }
 
+function makeEvaluatorResponse(evalContent: string): ShogunResponse {
+  return makeOpenAiResponse(evalContent);
+}
+
+function makeValidEvaluatorJson(): string {
+  return JSON.stringify({
+    status: 'evaluated',
+    grade: 85,
+    reasoning: 'The response meets the expected behavior.',
+    criteriaResults: [],
+  });
+}
+
 function makeRunOpts(cwd: string): Parameters<typeof runAgentTest>[2] {
   const config: ShogunConfig = {
     version: 1,
     defaults: { timeout: 300 },
+    evaluation: {
+      endpoint: 'https://eval.example.com/v1/chat/completions',
+      model: 'gpt-4o-eval',
+    },
   };
   const env: EnvVars = { BASE_URL: 'http://localhost:3000' };
   const session: SessionState = {
@@ -148,6 +177,14 @@ function setMockError(error: Error): void {
   mockConfig.error = error;
 }
 
+function setMockSecondResponse(response: ShogunResponse): void {
+  mockConfig.secondResponse = response;
+}
+
+function setMockSecondError(error: Error): void {
+  mockConfig.secondError = error;
+}
+
 // ---------------------------------------------------------------------------
 // Temp dir for context file tests
 // ---------------------------------------------------------------------------
@@ -184,39 +221,53 @@ describe('runAgentTest() — successful agent response', () => {
   test('extracts choices[0].message.content as agent output', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('The answer is 4.'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
     const result = await runAgentTest(test, 'test.yaml', opts);
 
-    // Placeholder status is 'failed' until evaluation (Story 4)
+    // Evaluation succeeded but Story 5 (contract validation) not yet implemented
     assert.equal(result.status, 'failed');
-    assert.equal(result.error, 'Agent test runner implemented; evaluation not yet wired (Story 4)');
+    assert.ok(
+      result.error!.includes('Evaluation transport succeeded; contract validation not yet implemented'),
+      'error should mention Story 5 placeholder',
+    );
 
-    // But the agent response is captured
+    // Agent response is captured
     assert.ok(result.agentResponse, 'agentResponse should be set');
     assert.equal(result.agentResponse!.status, 200);
 
-    // Verify the request was sent correctly
+    // Verify the agent request was sent correctly
     const calls = getCapturedCalls();
-    assert.equal(calls.length, 1);
-    const req = calls[0].req;
-    assert.equal(req.method, 'POST');
-    assert.equal(req.url, 'https://api.openai.com/v1/chat/completions');
+    assert.equal(calls.length, 2, 'should have 2 calls: agent + evaluator');
+    const agentReq = calls[0].req;
+    assert.equal(agentReq.method, 'POST');
+    assert.equal(agentReq.url, 'https://api.openai.com/v1/chat/completions');
 
-    // Verify the request body has the right structure
-    const body = JSON.parse(req.body as string);
+    // Verify the agent request body has the right structure
+    const body = JSON.parse(agentReq.body as string);
     assert.equal(body.model, 'gpt-4');
     assert.equal(body.temperature, 0.7);
     assert.ok(Array.isArray(body.messages));
     assert.equal(body.messages.length, 1);
     assert.equal(body.messages[0].role, 'user');
     assert.equal(body.messages[0].content, 'What is 2+2?');
+
+    // Verify evaluation request was sent
+    const evalReq = calls[1].req;
+    assert.equal(evalReq.method, 'POST');
+    assert.equal(evalReq.url, 'https://eval.example.com/v1/chat/completions');
+
+    // Verify evaluation diagnostics are present
+    assert.ok(result.evaluationRequest, 'evaluationRequest should be set');
+    assert.ok(result.evaluationResponse, 'evaluationResponse should be set');
   });
 
   test('uses custom temperature when set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Response'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest({
       agent: {
@@ -237,6 +288,7 @@ describe('runAgentTest() — successful agent response', () => {
   test('includes max_tokens when set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Short response'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest({
       agent: {
@@ -257,6 +309,7 @@ describe('runAgentTest() — successful agent response', () => {
   test('omits max_tokens when not set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Response'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
@@ -276,6 +329,7 @@ describe('runAgentTest() — system_prompt', () => {
   test('maps system_prompt to a system message', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest({
       agent: {
@@ -302,6 +356,7 @@ describe('runAgentTest() — system_prompt', () => {
   test('omits system message when system_prompt is not set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
@@ -322,6 +377,7 @@ describe('runAgentTest() — context_files', () => {
   test('appends context file contents to the user message', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     // Create a temp context file
     const contextFile = join(TMP_DIR, 'context.txt');
@@ -385,6 +441,7 @@ describe('runAgentTest() — context_files', () => {
   test('appends multiple context files in order', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const file1 = join(TMP_DIR, 'file1.txt');
     const file2 = join(TMP_DIR, 'file2.txt');
@@ -423,19 +480,23 @@ describe('runAgentTest() — auth handling', () => {
   test('autoInjectAuth: false is explicitly passed to executeRequest', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
     await runAgentTest(test, 'test.yaml', opts);
 
     const calls = getCapturedCalls();
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].opts?.autoInjectAuth, false, 'autoInjectAuth must be false');
+    assert.equal(calls.length, 2, 'should have 2 calls: agent + evaluator');
+    // Both agent and evaluator should have autoInjectAuth: false
+    assert.equal(calls[0].opts?.autoInjectAuth, false, 'agent autoInjectAuth must be false');
+    assert.equal(calls[1].opts?.autoInjectAuth, false, 'evaluator autoInjectAuth must be false');
   });
 
   test('includes Authorization header when api_key is set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest({
       agent: {
@@ -455,6 +516,7 @@ describe('runAgentTest() — auth handling', () => {
   test('omits Authorization header when api_key is not set', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('Answer'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
@@ -559,6 +621,7 @@ describe('runAgentTest() — result structure', () => {
   test('returns timings with curlMs from response', async () => {
     resetMock();
     setMockResponse(makeOpenAiResponse('4'));
+    setMockSecondResponse(makeEvaluatorResponse(makeValidEvaluatorJson()));
 
     const test = makeAgentTest();
     const opts = makeRunOpts(process.cwd());
@@ -566,7 +629,7 @@ describe('runAgentTest() — result structure', () => {
 
     assert.ok(result.timings, 'timings should be set');
     assert.equal(result.timings!.curlMs, 50);
-    assert.equal(result.timings!.assertMs, 0);
+    assert.ok(result.timings!.assertMs >= 0, 'assertMs should be set from evaluation');
     assert.equal(result.timings!.preMs, 0);
     assert.equal(result.timings!.postMs, 0);
   });
