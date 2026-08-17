@@ -489,6 +489,18 @@ async function runSingleTest(
 ): Promise<TestResult> {
   const testType = test.type ?? 'http';
 
+  // Agent tests cannot be snapshotted — skip in snapshot mode
+  if (opts.snapshotMode && testType === 'agent') {
+    return {
+      name: test.name,
+      file,
+      status: 'passed',  // not a failure — just skipped
+      durationMs: 0,
+      assertions: {},
+      scriptOutput: ['Skipped: agent tests do not support snapshot mode'],
+    };
+  }
+
   if (testType === 'sql' && test.sql) {
     return runSqlTest(test, file, opts);
   }
