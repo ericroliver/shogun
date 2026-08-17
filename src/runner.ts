@@ -34,8 +34,9 @@ import type {
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
   TestDefinition, SqlConnectionConfig, SqlScriptContext,
   AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig, EvaluatorResponse,
+  EvaluationAssertionResult,
 } from './types.js';
-import { buildEvaluationPrompt, parseEvaluatorResponse } from './agent-evaluator.js';
+import { buildEvaluationPrompt, parseEvaluatorResponse, validateCriteriaCorrespondence } from './agent-evaluator.js';
 import { resolveEvaluationConfig } from './loader.js';
 
 export interface RunOptions {
@@ -1028,31 +1029,74 @@ export async function runAgentTest(
     };
   }
 
-  // --- 8. Hand off to contract validation (Story 5) ---
-  // TODO: Story 5 — validate EvaluatorResponse, apply min_pass, produce EvaluationAssertionResult
-  // For now, evaluation succeeded but we have no pass/fail determination yet.
-  const durationMs = Date.now() - startMs;
-  const finalTimings: TestTimings = {
-    curlMs,
-    assertMs,
-    preMs: 0,
-    postMs: 0,
-    otherMs: Math.max(0, durationMs - curlMs - assertMs),
+  // --- 8. Validate criteria correspondence (Constraint 7) ---
+  const evaluatorResponse = evalResult.evaluatorResponse!;
+  try {
+    validateCriteriaCorrespondence(evaluatorResponse, test.evaluate?.criteria);
+  } catch (err) {
+    return {
+      name: test.name,
+      file,
+      status: 'failed',
+      durationMs: Date.now() - startMs,
+      timings: {
+        curlMs,
+        assertMs,
+        preMs: 0,
+        postMs: 0,
+        otherMs: Math.max(0, Date.now() - startMs - curlMs - assertMs),
+      },
+      assertions: {},
+      error: `Evaluation contract validation failed: ${err}`,
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    };
+  }
+
+  // --- 9. Apply min_pass and produce EvaluationAssertionResult ---
+  const minPass = test.evaluate?.min_pass ?? 80;
+  const evaluated = evaluatorResponse.status === 'evaluated';
+  const passed = evaluated && (evaluatorResponse.grade ?? 0) >= minPass;
+
+  const evaluationResult: EvaluationAssertionResult = {
+    status: evaluatorResponse.status,
+    grade: evaluatorResponse.grade,
+    passed,
+    reasoning: evaluatorResponse.reasoning,
+    criteriaResults: evaluatorResponse.criteriaResults,
+    evaluatorModel: evalConfig.model,
+    durationMs: assertMs,
   };
+
+  const allPassed = passed;  // for agent tests, evaluation is the only assertion
+  const finalStatus: TestResult['status'] = allPassed ? 'passed' : 'failed';
+
+  const durationMs = Date.now() - startMs;
 
   return {
     name: test.name,
     file,
-    status: 'failed',  // placeholder until Story 5 applies min_pass threshold
+    status: finalStatus,
     durationMs,
-    timings: finalTimings,
-    assertions: {},
-    error: 'Evaluation transport succeeded; contract validation not yet implemented (Story 5)',
+    timings: {
+      curlMs,
+      assertMs,
+      preMs: 0,
+      postMs: 0,
+      otherMs: Math.max(0, durationMs - curlMs - assertMs),
+    },
+    assertions: { evaluation: evaluationResult },
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    agentResponse: response,
-    resolvedRequest: request,
-    evaluationRequest: evalResult.evaluationRequest,
-    evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    // Diagnostics: include on failure; omit on pass
+    ...(finalStatus === 'failed' ? {
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    } : {}),
   };
 }
 

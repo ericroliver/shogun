@@ -227,16 +227,18 @@ describe('runAgentTest() — successful agent response', () => {
     const opts = makeRunOpts(process.cwd());
     const result = await runAgentTest(test, 'test.yaml', opts);
 
-    // Evaluation succeeded but Story 5 (contract validation) not yet implemented
-    assert.equal(result.status, 'failed');
-    assert.ok(
-      result.error!.includes('Evaluation transport succeeded; contract validation not yet implemented'),
-      'error should mention Story 5 placeholder',
-    );
+    // Story 5: evaluation succeeded with grade 85 >= default min_pass 80 → passed
+    assert.equal(result.status, 'passed');
+    assert.ok(result.assertions.evaluation, 'evaluation assertion should be present');
+    assert.equal(result.assertions.evaluation!.passed, true);
+    assert.equal(result.assertions.evaluation!.grade, 85);
+    assert.equal(result.assertions.evaluation!.status, 'evaluated');
 
-    // Agent response is captured
-    assert.ok(result.agentResponse, 'agentResponse should be set');
-    assert.equal(result.agentResponse!.status, 200);
+    // On pass, diagnostics are omitted (no agentResponse, resolvedRequest, etc.)
+    assert.equal(result.agentResponse, undefined, 'agentResponse should be omitted on pass');
+    assert.equal(result.resolvedRequest, undefined, 'resolvedRequest should be omitted on pass');
+    assert.equal(result.evaluationRequest, undefined, 'evaluationRequest should be omitted on pass');
+    assert.equal(result.evaluationResponse, undefined, 'evaluationResponse should be omitted on pass');
 
     // Verify the agent request was sent correctly
     const calls = getCapturedCalls();
@@ -259,9 +261,9 @@ describe('runAgentTest() — successful agent response', () => {
     assert.equal(evalReq.method, 'POST');
     assert.equal(evalReq.url, 'https://eval.example.com/v1/chat/completions');
 
-    // Verify evaluation diagnostics are present
-    assert.ok(result.evaluationRequest, 'evaluationRequest should be set');
-    assert.ok(result.evaluationResponse, 'evaluationResponse should be set');
+    // Verify evaluation diagnostics are omitted on pass
+    assert.equal(result.evaluationRequest, undefined, 'evaluationRequest should be omitted on pass');
+    assert.equal(result.evaluationResponse, undefined, 'evaluationResponse should be omitted on pass');
   });
 
   test('uses custom temperature when set', async () => {

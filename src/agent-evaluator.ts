@@ -210,3 +210,51 @@ export function parseEvaluatorResponse(rawContent: string): EvaluatorResponse {
     criteriaResults,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Criteria correspondence validation (Story 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates that the evaluator's criteriaResults match the supplied criteria
+ * in a strict 1:1, in-order correspondence (Constraint 7).
+ *
+ * Rules:
+ *   - If no criteria were supplied, this is a no-op (criteriaResults may be absent or empty).
+ *   - If criteria were supplied, criteriaResults must be present, have the same length,
+ *     and each criterion text must match exactly (no paraphrasing).
+ *
+ * Throws an Error with a descriptive message on any mismatch.
+ * Returns void on success.
+ */
+export function validateCriteriaCorrespondence(
+  evaluatorResponse: EvaluatorResponse,
+  criteria: string[] | undefined,
+): void {
+  if (!criteria || criteria.length === 0) {
+    // No criteria supplied — criteriaResults may be absent or empty
+    return;
+  }
+
+  const results = evaluatorResponse.criteriaResults;
+
+  if (!results || results.length === 0) {
+    throw new Error(
+      `Criteria were supplied (${criteria.length} items) but evaluator returned no criteriaResults.`
+    );
+  }
+
+  if (results.length !== criteria.length) {
+    throw new Error(
+      `Criteria count mismatch: supplied ${criteria.length}, evaluator returned ${results.length}.`
+    );
+  }
+
+  for (let i = 0; i < criteria.length; i++) {
+    if (results[i].criterion !== criteria[i]) {
+      throw new Error(
+        `Criteria mismatch at index ${i}: expected "${criteria[i]}", got "${results[i].criterion}".`
+      );
+    }
+  }
+}
