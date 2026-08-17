@@ -23,8 +23,12 @@ export async function snapshot(args: SnapshotArgs): Promise<number> {
       snapshotMode: true,
     });
 
-    const captured = summary.results.filter(r => r.status === 'passed').length;
+    const captured = summary.results.filter(r => r.status === 'passed' && !r.scriptOutput?.some(s => s.includes('Skipped'))).length;
+    const skipped = summary.results.filter(r => r.scriptOutput?.some(s => s.includes('Skipped'))).length;
     console.log(`\nCaptured ${captured} snapshot(s) in expected/`);
+    if (skipped > 0) {
+      console.log(`Skipped ${skipped} agent test(s) — no snapshot baseline`);
+    }
     return 0;
   } catch (err) {
     console.error(`Snapshot error: ${err instanceof Error ? err.message : String(err)}`);

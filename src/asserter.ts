@@ -169,7 +169,8 @@ export function assertionsAllPassed(results: AssertionResults): boolean {
     results.status !== undefined ||
     (results.shape !== undefined && results.shape.length > 0) ||
     results.snapshot !== undefined ||
-    results.postScript !== undefined;
+    results.postScript !== undefined ||
+    results.evaluation !== undefined;  // agent test evaluation
 
   if (!hasAnyAssertion) {
     if (process.env.SHOGUN_DEBUG) {
@@ -182,5 +183,6 @@ export function assertionsAllPassed(results: AssertionResults): boolean {
   if (results.shape?.some(s => !s.passed)) return false;
   if (results.snapshot === false) return false;
   if (results.postScript === false) return false;
+  if (results.evaluation && !results.evaluation.passed) return false;  // agent test evaluation
   return true;
 }

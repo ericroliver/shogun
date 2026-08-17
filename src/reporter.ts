@@ -68,7 +68,150 @@ export function printSqlTestDetails(result: TestResult): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Agent test result display
+// ---------------------------------------------------------------------------
+
+/**
+ * Prints agent test result details: grade, criteria, reasoning.
+ * Called from printTestResult when assertions.evaluation is present.
+ */
+function printAgentTestResult(result: TestResult): void {
+  const evalResult = result.assertions.evaluation;
+  if (!evalResult) return;
+
+  const gradeStr = evalResult.grade !== undefined
+    ? `${evalResult.grade}/100`
+    : 'N/A';
+  const statusStr = evalResult.status === 'indeterminate'
+    ? `${c.yellow}INDETERMINATE${c.reset}`
+    : evalResult.passed
+      ? `${c.green}PASS${c.reset}`
+      : `${c.red}FAIL${c.reset}`;
+
+  console.log(`    ${statusStr}  ${c.bold}Grade: ${gradeStr}${c.reset}  ${c.dim}min_pass: ${evalResult.grade !== undefined ? '' : '(no grade)'}${c.reset}`);
+  console.log(`    ${c.dim}Evaluator: ${evalResult.evaluatorModel ?? 'unknown'}${c.reset}`);
+
+  if (evalResult.reasoning) {
+    console.log(`    ${c.dim}Reasoning:${c.reset}`);
+    for (const line of evalResult.reasoning.split('\n')) {
+      console.log(`      ${line}`);
+    }
+  }
+
+  if (evalResult.criteriaResults?.length) {
+    console.log(`    ${c.dim}Criteria:${c.reset}`);
+    for (const cr of evalResult.criteriaResults) {
+      const icon = cr.met ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
+      console.log(`      ${icon} ${cr.criterion}`);
+      if (cr.reasoning) {
+        for (const line of cr.reasoning.split('\n')) {
+          console.log(`        ${c.dim}${line}${c.reset}`);
+        }
+      }
+    }
+  }
+
+  // On failure, show diagnostic request/response for both sides
+  if (result.status === 'failed') {
+    if (result.error) {
+      console.log(`    ${c.red}Error: ${result.error}${c.reset}`);
+    }
+
+    // Show agent response (truncated)
+    if (result.agentResponse) {
+      console.log(`    ${c.dim}── agent response ──────────────────────────${c.reset}`);
+      const res = result.agentResponse;
+      const statusColor = res.status >= 400 ? c.red : c.green;
+      console.log(`    ${c.dim}│ ${c.reset}${statusColor}${res.status}${c.reset}  ${c.dim}${res.curlMs}ms${c.reset}`);
+      const rawBody = typeof res.raw === 'string' ? res.raw : JSON.stringify(res.body);
+      const snippet = rawBody.length > 800 ? rawBody.slice(0, 800) + '…' : rawBody;
+      if (snippet.trim()) {
+        console.log(`    ${c.dim}│   body:${c.reset}`);
+        for (const line of snippet.split('\n').slice(0, 15)) {
+          console.log(`    ${c.dim}│     ${line}${c.reset}`);
+        }
+      }
+    }
+
+    // Show evaluation request + response
+    if (result.evaluationRequest || result.evaluationResponse) {
+      console.log(`    ${c.dim}── evaluation ────────────────────────────────${c.reset}`);
+      if (result.evaluationRequest) {
+        const req = result.evaluationRequest;
+        console.log(`    ${c.dim}│ ${c.reset}${c.bold}${req.method}${c.reset} ${req.url}`);
+        if (req.body !== undefined) {
+          const bodyStr = typeof req.body === 'string'
+            ? req.body
+            : JSON.stringify(req.body, null, 2);
+          const snippet = bodyStr.length > 800 ? bodyStr.slice(0, 800) + '…' : bodyStr;
+          console.log(`    ${c.dim}│   body: ${snippet}${c.reset}`);
+        }
+      }
+      if (result.evaluationResponse) {
+        const res = result.evaluationResponse;
+        const statusColor = res.status >= 400 ? c.red : c.green;
+        console.log(`    ${c.dim}│ ${c.reset}${statusColor}${res.status}${c.reset}  ${c.dim}${res.curlMs}ms${c.reset}`);
+        const rawBody = typeof res.raw === 'string' ? res.raw : JSON.stringify(res.body);
+        const snippet = rawBody.length > 800 ? rawBody.slice(0, 800) + '…' : rawBody;
+        if (snippet.trim()) {
+          console.log(`    ${c.dim}│   body:${c.reset}`);
+          for (const line of snippet.split('\n').slice(0, 15)) {
+            console.log(`    ${c.dim}│     ${line}${c.reset}`);
+          }
+        }
+      }
+    }
+    console.log(`    ${c.dim}──────────────────────────────────────────────${c.reset}`);
+  }
+}
+
 export function printTestResult(result: TestResult): void {
+  // Agent tests have their own display format
+  if (result.assertions.evaluation) {
+    const httpCode = result.httpStatus != null ? `${result.httpStatus} ` : '';
+    switch (result.status) {
+      case 'passed':
+        process.stdout.write(`${c.green}${httpCode}OK${c.reset} ${c.dim}${result.durationMs}ms${c.reset}${formatTimings(result)}\n`);
+        // Print a brief evaluation summary for passing agent tests
+        {
+          const evalResult = result.assertions.evaluation;
+          if (evalResult) {
+            const gradeStr = evalResult.grade !== undefined ? `${evalResult.grade}/100` : 'N/A';
+            console.log(`    ${c.green}✓${c.reset} Grade: ${gradeStr}  ${c.dim}(${evalResult.evaluatorModel})${c.reset}`);
+          }
+        }
+        break;
+      case 'failed':
+        process.stdout.write(`${c.red}${httpCode}FAIL${c.reset}\n`);
+        printAgentTestResult(result);
+        break;
+      case 'dependency_failed':
+        process.stdout.write(`${c.yellow}SKIPPED${c.reset} ${c.dim}(dependency failed)${c.reset}\n`);
+        if (result.failedDependency) {
+          console.log(`    ${c.dim}↳ blocked by: ${result.failedDependency}${c.reset}`);
+        }
+        break;
+      case 'needs_baseline':
+        process.stdout.write(`${c.yellow}NEEDS BASELINE${c.reset}\n`);
+        break;
+    }
+
+    // Script output (same as existing)
+    const showScriptOutput =
+      result.status === 'failed'
+        ? result.scriptOutput?.length
+        : process.env.SHOGUN_DEBUG && result.scriptOutput?.length;
+    if (showScriptOutput) {
+      console.log(`    ${c.dim}── script output ─────────────────────────${c.reset}`);
+      for (const msg of result.scriptOutput!) {
+        console.log(`    ${c.dim}│ ${msg}${c.reset}`);
+      }
+      console.log(`    ${c.dim}─────────────────────────────────────────${c.reset}`);
+    }
+    return;
+  }
+
   const httpCode = result.httpStatus != null ? `${result.httpStatus} ` : '';
   switch (result.status) {
     case 'passed':
@@ -367,6 +510,21 @@ export function getFailureReasons(assertions: AssertionResults): string[] {
 
   if (assertions.postScript === false) {
     reasons.push(`Post-script: ${assertions.postScriptError ?? 'assertion failed'}`);
+  }
+
+  // Evaluation failure (agent tests)
+  if (assertions.evaluation && !assertions.evaluation.passed) {
+    if (assertions.evaluation.status === 'indeterminate') {
+      reasons.push('Evaluation: indeterminate (manual review required)');
+    } else {
+      const grade = assertions.evaluation.grade ?? 'N/A';
+      reasons.push(`Evaluation: grade ${grade} below threshold`);
+    }
+    // Add unmet criteria
+    const unmet = assertions.evaluation.criteriaResults?.filter(cr => !cr.met) ?? [];
+    for (const cr of unmet) {
+      reasons.push(`  Criterion not met: ${cr.criterion}`);
+    }
   }
 
   return reasons;
