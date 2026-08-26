@@ -552,6 +552,7 @@ describe('assertionsAllPassed — evaluation assertion', () => {
         status: 'evaluated',
         grade: 90,
         passed: true,
+        minPass: 80,
         reasoning: 'Good.',
       },
     };
@@ -564,6 +565,7 @@ describe('assertionsAllPassed — evaluation assertion', () => {
         status: 'evaluated',
         grade: 50,
         passed: false,
+        minPass: 80,
         reasoning: 'Not good enough.',
       },
     };
@@ -576,6 +578,7 @@ describe('assertionsAllPassed — evaluation assertion', () => {
         status: 'evaluated',
         grade: 100,
         passed: true,
+        minPass: 80,
         reasoning: 'Perfect.',
       },
       // No status, shape, snapshot, or postScript assertions
@@ -588,6 +591,7 @@ describe('assertionsAllPassed — evaluation assertion', () => {
       evaluation: {
         status: 'indeterminate',
         passed: false,
+        minPass: 80,
         reasoning: 'Cannot determine.',
       },
     };

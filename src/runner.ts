@@ -497,7 +497,7 @@ async function runSingleTest(
       status: 'passed',  // not a failure — just skipped
       durationMs: 0,
       assertions: {},
-      scriptOutput: ['Skipped: agent tests do not support snapshot mode'],
+      scriptOutput: [AGENT_SNAPSHOT_SKIP_MSG],
     };
   }
 
@@ -885,14 +885,15 @@ async function runSqlTest(
 // Agent test execution
 // ---------------------------------------------------------------------------
 
+/** Message emitted in scriptOutput when agent tests are skipped in snapshot mode */
+export const AGENT_SNAPSHOT_SKIP_MSG = 'Skipped: agent tests do not support snapshot mode';
+
 /**
  * Runs an agent test by constructing an OpenAI-compatible /chat/completions
- * request, sending it to the target agent via executeRequest(), and
- * extracting choices[0].message.content as the agent output.
- *
- * The evaluation phase (Story 4) is not yet wired — this function returns
- * a placeholder result with status 'failed' and an error noting that
- * evaluation is not yet implemented.
+ * request, sending it to the target agent via executeRequest(), extracting
+ * choices[0].message.content as the agent output, then evaluating the
+ * response via a separate evaluator model with strict JSON contract
+ * validation and min_pass thresholding.
  */
 export async function runAgentTest(
   test: TestDefinition,
@@ -1004,7 +1005,17 @@ export async function runAgentTest(
   }
 
   // --- 5. Resolve evaluation config ---
-  const evalConfig = resolveEvaluationConfig(test.evaluate, opts.config, opts.env);
+  let evalConfig;
+  try {
+    evalConfig = resolveEvaluationConfig(test.evaluate, opts.config, opts.env);
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Evaluation config error: ${err instanceof Error ? err.message : String(err)}`, scriptOutput),
+      agentResponse: response,
+      resolvedRequest: request,
+    };
+  }
 
   // --- 6. Send to evaluator ---
   const evalResult = await evaluateAgentResponse({
@@ -1077,6 +1088,7 @@ export async function runAgentTest(
     status: evaluatorResponse.status,
     grade: evaluatorResponse.grade,
     passed,
+    minPass,
     reasoning: evaluatorResponse.reasoning,
     criteriaResults: evaluatorResponse.criteriaResults,
     evaluatorModel: evalConfig.model,
@@ -1132,7 +1144,7 @@ async function evaluateAgentResponse(args: {
   agentOutput: string;
   expected: AgentExpectedDef | undefined;
   evaluate: AgentEvaluateConfig | undefined;
-  evalConfig: { endpoint: string; model: string; api_key?: string; temperature: number; evaluator_system_prompt?: string };
+  evalConfig: { endpoint: string; model: string; api_key?: string; temperature: number; timeout?: number; evaluator_system_prompt?: string };
   env: EnvVars;
 }): Promise<{
   evaluatorResponse: EvaluatorResponse | null;
@@ -1179,7 +1191,7 @@ async function evaluateAgentResponse(args: {
   let evaluationResponse: ShogunResponse;
   try {
     evaluationResponse = await executeRequest(evaluationRequest, args.env, {
-      timeout: 300,
+      timeout: parseInt(args.env.TIMEOUT ?? String(args.evalConfig.timeout ?? 300), 10),
       autoInjectAuth: false,  // Constraint 3
       contentType: 'application/json',
     });

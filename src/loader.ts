@@ -91,6 +91,7 @@ export const ShogunConfigSchema = z.object({
     api_key: z.string().optional(),
     model: z.string().min(1),
     temperature: z.number().optional(),
+    timeout: z.number().optional(),
   }).optional(),
 });
 
@@ -299,6 +300,7 @@ const AgentEvaluateSchema = z.object({
   model: z.string().optional(),
   api_key: z.string().optional(),
   temperature: z.number().optional(),
+  timeout: z.number().optional(),
   evaluator_system_prompt: z.string().optional(),
 }).optional();
 
@@ -735,6 +737,7 @@ export function resolveEvaluationConfig(
   model: string;
   api_key?: string;
   temperature: number;
+  timeout: number;
   evaluator_system_prompt?: string;
 } {
   const globalEval = config.evaluation;
@@ -748,6 +751,9 @@ export function resolveEvaluationConfig(
   const temperature = testEvaluate?.temperature
     ?? globalEval?.temperature
     ?? 0;
+  const timeout = testEvaluate?.timeout
+    ?? globalEval?.timeout
+    ?? 300;
 
   if (!endpoint) {
     throw new Error(
@@ -765,6 +771,7 @@ export function resolveEvaluationConfig(
     model: interpolateEnv(model, env),
     api_key: api_key ? interpolateEnv(api_key, env) : undefined,
     temperature,
+    timeout,
     evaluator_system_prompt: testEvaluate?.evaluator_system_prompt,
   };
 }

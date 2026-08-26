@@ -39,6 +39,7 @@ function makeEvalResult(overrides?: Partial<EvaluationAssertionResult>): Evaluat
     status: 'evaluated',
     grade: 85,
     passed: true,
+    minPass: 80,
     reasoning: 'The response meets the expected behavior.',
     criteriaResults: [
       { criterion: 'Returns correct answer', met: true },

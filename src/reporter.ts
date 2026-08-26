@@ -89,7 +89,7 @@ function printAgentTestResult(result: TestResult): void {
       ? `${c.green}PASS${c.reset}`
       : `${c.red}FAIL${c.reset}`;
 
-  console.log(`    ${statusStr}  ${c.bold}Grade: ${gradeStr}${c.reset}  ${c.dim}min_pass: ${evalResult.grade !== undefined ? '' : '(no grade)'}${c.reset}`);
+  console.log(`    ${statusStr}  ${c.bold}Grade: ${gradeStr}${c.reset}  ${c.dim}min_pass: ${evalResult.minPass ?? '(not set)'}${c.reset}`);
   console.log(`    ${c.dim}Evaluator: ${evalResult.evaluatorModel ?? 'unknown'}${c.reset}`);
 
   if (evalResult.reasoning) {

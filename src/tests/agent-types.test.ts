@@ -49,7 +49,7 @@ describe('Type exports from src/types.ts', () => {
     const _evaluate: AgentEvaluateConfig = { criteria: ['is polite'], min_pass: 80 };
     const _evalConfig: EvaluationConfig = { endpoint: 'http://localhost:11434/v1/chat/completions', model: 'eval-model' };
     const _evalResponse: EvaluatorResponse = { status: 'evaluated', grade: 90, reasoning: 'good' };
-    const _evalResult: EvaluationAssertionResult = { status: 'evaluated', grade: 90, passed: true, reasoning: 'good' };
+    const _evalResult: EvaluationAssertionResult = { status: 'evaluated', grade: 90, passed: true, minPass: 80, reasoning: 'good' };
     const _assertions: AssertionResults = { evaluation: _evalResult };
     const _testDef: TestDefinition = {
       name: 'test',

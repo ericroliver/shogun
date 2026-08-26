@@ -162,6 +162,8 @@ export interface AgentEvaluateConfig {
   api_key?: string;
   /** Override global evaluator temperature. Default: 0 */
   temperature?: number;
+  /** Override global evaluator timeout (seconds). Default: 300 */
+  timeout?: number;
   /** Optional system prompt for the evaluator */
   evaluator_system_prompt?: string;
 }
@@ -192,6 +194,8 @@ export interface EvaluationAssertionResult {
   grade?: number;
   /** Computed by Shogun: grade >= min_pass */
   passed: boolean;
+  /** The min_pass threshold applied (default 80) */
+  minPass: number;
   reasoning: string;
   criteriaResults?: {
     criterion: string;
@@ -625,6 +629,7 @@ export interface EvaluationConfig {
   api_key?: string;
   model: string;
   temperature?: number;  // default 0
+  timeout?: number;  // default 300 (seconds)
 }
 
 export interface ShogunConfig {
