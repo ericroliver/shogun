@@ -56,6 +56,10 @@ export async function collectTestEntries(
       }
 
       const p = parsed as Record<string, unknown>;
+
+      // Skip agent tests — they don't test REST endpoints
+      if (p['type'] === 'agent') continue;
+
       const req = p['request'] as Record<string, unknown> | undefined;
       if (!req) continue;
 
