@@ -16,6 +16,7 @@
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import * as yaml from 'js-yaml';
 import { loadConfig, discoverCollections, listEnvFiles } from '../loader.js';
 import type { ShogunConfig } from '../types.js';
 
@@ -55,14 +56,45 @@ function getTestsInCollection(
     .sort();
 }
 
+interface TestWithType {
+  name: string;
+  type: string;
+}
+
+function getTestsWithType(
+  collectionName: string,
+  config: ShogunConfig,
+  cwd: string,
+): TestWithType[] {
+  const collectionsDir = join(cwd, config.paths?.tests ?? 'tests', 'collections');
+  const collectionDir = join(collectionsDir, collectionName);
+  if (!existsSync(collectionDir)) return [];
+  const files = readdirSync(collectionDir)
+    .filter(f => f.endsWith('.yaml') && f !== '_collection.yaml')
+    .sort();
+
+  return files.map(f => {
+    let type = 'http';  // default
+    try {
+      const raw = readFileSync(join(collectionDir, f), 'utf8');
+      const parsed = yaml.load(raw) as Record<string, unknown>;
+      if (parsed?.['type'] === 'sql') type = 'sql';
+      else if (parsed?.['type'] === 'agent') type = 'agent';
+    } catch {
+      // ignore — show as http default
+    }
+    return { name: f.replace(/\.yaml$/, ''), type };
+  });
+}
+
 function getAllTests(
   config: ShogunConfig,
   cwd: string,
-): Record<string, string[]> {
+): Record<string, TestWithType[]> {
   const collections = getCollections(config, cwd);
-  const result: Record<string, string[]> = {};
+  const result: Record<string, TestWithType[]> = {};
   for (const col of collections) {
-    result[col] = getTestsInCollection(col, config, cwd);
+    result[col] = getTestsWithType(col, config, cwd);
   }
   return result;
 }
@@ -94,7 +126,7 @@ interface LsResult {
   envs: string[];
   collections: string[];
   suites: string[];
-  tests: Record<string, string[]>;
+  tests: Record<string, TestWithType[]>;
   setupFixtures: string[];
   runs: string[];
 }
@@ -137,7 +169,7 @@ function printHuman(result: LsResult): void {
       if (tests.length === 0) continue;
       console.log(`    ${col}/`);
       for (const t of tests) {
-        console.log(`      • ${t}`);
+        console.log(`      [${t.type}] ${t.name}`);
       }
     }
   }
@@ -234,11 +266,18 @@ export async function ls(opts: LsOptions): Promise<number> {
         }
         case 'tests': {
           if (opts.collection) {
-            const items = getTestsInCollection(opts.collection, config, cwd);
+            const items = getTestsWithType(opts.collection, config, cwd);
             if (format === 'json') {
               console.log(JSON.stringify({ collection: opts.collection, tests: items }, null, 2));
             } else {
-              printSection(`Tests in "${opts.collection}"`, items);
+              console.log(`\n  Tests in "${opts.collection}" (${items.length}):`);
+              if (items.length === 0) {
+                console.log('    —');
+              } else {
+                for (const t of items) {
+                  console.log(`    [${t.type}] ${t.name}`);
+                }
+              }
               console.log('');
             }
           } else {
@@ -255,7 +294,7 @@ export async function ls(opts: LsOptions): Promise<number> {
                   if (colTests.length === 0) continue;
                   console.log(`    ${col}/`);
                   for (const t of colTests) {
-                    console.log(`      • ${t}`);
+                    console.log(`      [${t.type}] ${t.name}`);
                   }
                 }
               }

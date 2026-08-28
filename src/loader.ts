@@ -21,6 +21,7 @@ import type {
   CoverageMinThresholds,
   SqlConnectionConfig,
   SqlTestConfig,
+  AgentEvaluateConfig,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ const CoverageConfigSchema = z.object({
   suppressDrift: z.array(z.string()).optional(),
 }).passthrough();
 
-const ShogunConfigSchema = z.object({
+export const ShogunConfigSchema = z.object({
   version: z.number(),
   defaults: z.object({
     env: z.string().optional(),
@@ -84,6 +85,14 @@ const ShogunConfigSchema = z.object({
     })
   ).optional(),
   coverage: CoverageConfigSchema.optional(),
+  // Global evaluation configuration for agent tests
+  evaluation: z.object({
+    endpoint: z.string().min(1),
+    api_key: z.string().optional(),
+    model: z.string().min(1),
+    temperature: z.number().optional(),
+    timeout: z.number().optional(),
+  }).optional(),
 });
 
 export function loadConfig(cwd: string = process.cwd()): ShogunConfig {
@@ -285,9 +294,38 @@ const SqlTestConfigSchema = z.object({
   { message: 'Either sql.proc or sql.query is required' },
 ).optional();
 
+// Agent test configuration schema
+const AgentTestConfigSchema = z.object({
+  endpoint: z.string().min(1, 'agent.endpoint is required'),
+  model: z.string().min(1, 'agent.model is required'),
+  prompt: z.string().min(1, 'agent.prompt is required'),
+  temperature: z.number().optional(),
+  max_tokens: z.number().optional(),
+  api_key: z.string().optional(),
+  parameters: z.object({
+    system_prompt: z.string().optional(),
+    context_files: z.array(z.string()).optional(),
+  }).optional(),
+}).optional();
+
+const AgentExpectedSchema = z.object({
+  description: z.string().optional(),
+}).optional();
+
+const AgentEvaluateSchema = z.object({
+  criteria: z.array(z.string()).optional(),
+  min_pass: z.number().min(0).max(100).optional(),
+  endpoint: z.string().optional(),
+  model: z.string().optional(),
+  api_key: z.string().optional(),
+  temperature: z.number().optional(),
+  timeout: z.number().optional(),
+  evaluator_system_prompt: z.string().optional(),
+}).optional();
+
 export const TestDefinitionSchema = z.object({
   name: z.string().min(1, 'name is required'),
-  type: z.enum(['http', 'sql']).optional(),
+  type: z.enum(['http', 'sql', 'agent']).optional(),
   description: z.string().optional(),
   collection: z.string().optional(),
   tags: z.array(z.string()).optional(),
@@ -298,10 +336,27 @@ export const TestDefinitionSchema = z.object({
   response: ResponseDefSchema,
   post: z.string().optional(),
   sql: SqlTestConfigSchema,
-}).refine(
-  // request is required when type is 'http' or undefined
-  (data) => (data.type === 'sql') || (data.request !== undefined),
+  agent: AgentTestConfigSchema,
+  expected: AgentExpectedSchema,
+  evaluate: AgentEvaluateSchema,
+})
+// request is required when type is 'http' or undefined; skip for 'sql' and 'agent'
+.refine(
+  (data) => (data.type === 'sql' || data.type === 'agent') || (data.request !== undefined),
   { message: 'request is required for HTTP tests (type is http or omitted)' },
+)
+// Agent tests require agent config and at least one of expected.description or evaluate.criteria
+.refine(
+  (data) => {
+    if (data.type !== 'agent') return true;
+    // Must have agent config
+    if (!data.agent) return false;
+    // Minimum semantic expectation: at least one of expected.description or evaluate.criteria
+    const hasDescription = !!data.expected?.description?.trim();
+    const hasCriteria = !!(data.evaluate?.criteria?.length);
+    return hasDescription || hasCriteria;
+  },
+  { message: 'Agent tests require agent config and at least one of expected.description or evaluate.criteria' },
 );
 
 // ---------------------------------------------------------------------------
@@ -674,6 +729,69 @@ export function resolveSqlConnection(
     driver: conn.driver,
     connectionString: interpolateEnv(conn.connectionString, env),
     timeout: conn.timeout,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent evaluation config resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the evaluation configuration for a specific test run.
+ * Merges per-test evaluate config over global evaluation config.
+ * Performs environment interpolation on all string values.
+ *
+ * @param testEvaluate - Per-test `evaluate` block (may override global)
+ * @param config - Global shogun config (may contain `evaluation` block)
+ * @param env - Selected environment vars
+ * @returns Resolved evaluation config with endpoint, model, api_key, temperature
+ * @throws if no endpoint or model is available (global or per-test)
+ */
+export function resolveEvaluationConfig(
+  testEvaluate: AgentEvaluateConfig | undefined,
+  config: ShogunConfig,
+  env: EnvVars,
+): {
+  endpoint: string;
+  model: string;
+  api_key?: string;
+  temperature: number;
+  timeout: number;
+  evaluator_system_prompt?: string;
+} {
+  const globalEval = config.evaluation;
+
+  const endpoint = testEvaluate?.endpoint
+    ?? globalEval?.endpoint;
+  const model = testEvaluate?.model
+    ?? globalEval?.model;
+  const api_key = testEvaluate?.api_key
+    ?? globalEval?.api_key;
+  const temperature = testEvaluate?.temperature
+    ?? globalEval?.temperature
+    ?? 0;
+  const timeout = testEvaluate?.timeout
+    ?? globalEval?.timeout
+    ?? 300;
+
+  if (!endpoint) {
+    throw new Error(
+      'Evaluation endpoint is required. Set evaluation.endpoint in shogun.config.yaml or evaluate.endpoint in the test.'
+    );
+  }
+  if (!model) {
+    throw new Error(
+      'Evaluation model is required. Set evaluation.model in shogun.config.yaml or evaluate.model in the test.'
+    );
+  }
+
+  return {
+    endpoint: interpolateEnv(endpoint, env),
+    model: interpolateEnv(model, env),
+    api_key: api_key ? interpolateEnv(api_key, env) : undefined,
+    temperature,
+    timeout,
+    evaluator_system_prompt: testEvaluate?.evaluator_system_prompt,
   };
 }
 

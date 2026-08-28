@@ -146,6 +146,51 @@ export async function lint(args: LintArgs): Promise<number> {
   }
 
   // -------------------------------------------------------------------------
+  // Phase 1c: Agent test warnings
+  // -------------------------------------------------------------------------
+
+  if (validFiles.length > 0) {
+    let hasAgentWarnings = false;
+    const agentWarnings: string[] = [];
+
+    for (const file of validFiles) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = yaml.load(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      } catch {
+        continue; // Already caught in Phase 1
+      }
+
+      if (parsed?.type !== 'agent') continue;
+
+      hasAgentWarnings = true;
+      const evaluate = parsed['evaluate'] as Record<string, unknown> | undefined;
+
+      // Warn on missing criteria (holistic evaluation works but is less useful)
+      if (!evaluate?.['criteria']) {
+        agentWarnings.push(`  ⚠ ${file}: agent test has no evaluate.criteria — evaluation will be holistic only`);
+      }
+
+      // Warn on very low min_pass
+      const minPass = evaluate?.['min_pass'];
+      if (typeof minPass === 'number' && minPass < 50) {
+        agentWarnings.push(`  ⚠ ${file}: min_pass ${minPass} is very low — consider whether this is intentional`);
+      }
+    }
+
+    if (hasAgentWarnings) {
+      console.log('\nValidating agent test definitions...\n');
+      if (agentWarnings.length > 0) {
+        for (const w of agentWarnings) {
+          console.warn(w);
+        }
+      } else {
+        console.log('  All agent tests have criteria and reasonable thresholds.');
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Phase 2: Collection-level validation (setup_fixtures + order refs)
   // -------------------------------------------------------------------------
 

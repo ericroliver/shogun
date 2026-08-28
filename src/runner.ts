@@ -9,8 +9,8 @@
  *  - dependsOn: automatically resolves and runs test dependencies before the target test
  */
 
-import { join, relative } from 'node:path';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
@@ -33,7 +33,11 @@ import type {
   ShogunRequest, ShogunResponse, TestResult, TestTimings, EnvVars,
   RunSummary, ShogunConfig, SessionState, SuiteDefinition,
   TestDefinition, SqlConnectionConfig, SqlScriptContext,
+  AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig, EvaluatorResponse,
+  EvaluationAssertionResult,
 } from './types.js';
+import { buildEvaluationPrompt, parseEvaluatorResponse, validateCriteriaCorrespondence } from './agent-evaluator.js';
+import { resolveEvaluationConfig } from './loader.js';
 
 export interface RunOptions {
   env?: string;
@@ -485,8 +489,24 @@ async function runSingleTest(
 ): Promise<TestResult> {
   const testType = test.type ?? 'http';
 
+  // Agent tests cannot be snapshotted — skip in snapshot mode
+  if (opts.snapshotMode && testType === 'agent') {
+    return {
+      name: test.name,
+      file,
+      status: 'passed',  // not a failure — just skipped
+      durationMs: 0,
+      assertions: {},
+      scriptOutput: [AGENT_SNAPSHOT_SKIP_MSG],
+    };
+  }
+
   if (testType === 'sql' && test.sql) {
     return runSqlTest(test, file, opts);
+  }
+
+  if (testType === 'agent' && test.agent) {
+    return runAgentTest(test, file, opts);
   }
 
   // Existing HTTP path — unchanged
@@ -864,6 +884,377 @@ async function runSqlTest(
 }
 
 // ---------------------------------------------------------------------------
+// Agent test execution
+// ---------------------------------------------------------------------------
+
+/** Message emitted in scriptOutput when agent tests are skipped in snapshot mode */
+export const AGENT_SNAPSHOT_SKIP_MSG = 'Skipped: agent tests do not support snapshot mode';
+
+/**
+ * Runs an agent test by constructing an OpenAI-compatible /chat/completions
+ * request, sending it to the target agent via executeRequest(), extracting
+ * choices[0].message.content as the agent output, then evaluating the
+ * response via a separate evaluator model with strict JSON contract
+ * validation and min_pass thresholding.
+ */
+export async function runAgentTest(
+  test: TestDefinition,
+  file: string,
+  opts: SingleTestOpts,
+): Promise<TestResult> {
+  const startMs = Date.now();
+  const scriptOutput: string[] = [];
+  const agent = test.agent!;
+
+  // --- 1. Construct OpenAI-compatible request body ---
+  const messages: Array<{ role: string; content: string }> = [];
+
+  if (agent.parameters?.system_prompt) {
+    messages.push({ role: 'system', content: agent.parameters.system_prompt });
+  }
+
+  let userContent = agent.prompt;
+
+  // Append context file contents to the user message
+  if (agent.parameters?.context_files?.length) {
+    for (const filePath of agent.parameters.context_files) {
+      try {
+        const resolved = resolve(opts.cwd, filePath);
+        const contents = readFileSync(resolved, 'utf8');
+        userContent += `\n\n--- ${filePath} ---\n${contents}`;
+      } catch (err) {
+        return makeFailedResult(test.name, file, startMs, {},
+          `Failed to read context file "${filePath}": ${err}`, scriptOutput);
+      }
+    }
+  }
+
+  messages.push({ role: 'user', content: userContent });
+
+  const requestBody: Record<string, unknown> = {
+    model: agent.model,
+    messages,
+    temperature: agent.temperature ?? 0.7,
+  };
+
+  if (agent.max_tokens !== undefined) {
+    requestBody.max_tokens = agent.max_tokens;
+  }
+
+  // --- 2. Build ShogunRequest ---
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (agent.api_key) {
+    headers['Authorization'] = `Bearer ${agent.api_key}`;
+  }
+
+  const request: ShogunRequest = {
+    method: 'POST',
+    path: agent.endpoint,
+    url: agent.endpoint,  // full URL, not relative to BASE_URL
+    headers,
+    params: {},
+    body: JSON.stringify(requestBody),
+  };
+
+  // --- 3. Execute HTTP request to target agent ---
+  // Disable AUTH_TOKEN auto-injection (Constraint 3)
+  let response: ShogunResponse;
+  try {
+    response = await executeRequest(request, opts.env, {
+      timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 300), 10),
+      autoInjectAuth: false,  // explicitly disabled
+      contentType: 'application/json',
+    });
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Agent HTTP request failed: ${err}`, scriptOutput),
+      agentResponse: undefined,
+      resolvedRequest: request,
+    };
+  }
+
+  const curlMs = response.curlMs;
+
+  // --- 4. Extract choices[0].message.content (Constraint 2) ---
+  let agentOutput: string;
+  try {
+    const body = typeof response.body === 'string'
+      ? JSON.parse(response.body)
+      : response.body;
+
+    const content = body?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || content.trim() === '') {
+      // Execution failure — not a grade of zero
+      return {
+        ...makeFailedResult(test.name, file, startMs, {},
+          'Agent response missing choices[0].message.content or content is empty', scriptOutput),
+        agentResponse: response,
+        resolvedRequest: request,
+      };
+    }
+    agentOutput = content;
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Failed to parse agent response: ${err}`, scriptOutput),
+      agentResponse: response,
+      resolvedRequest: request,
+    };
+  }
+
+  // --- 5. Resolve evaluation config ---
+  let evalConfig;
+  try {
+    evalConfig = resolveEvaluationConfig(test.evaluate, opts.config, opts.env);
+  } catch (err) {
+    return {
+      ...makeFailedResult(test.name, file, startMs, {},
+        `Evaluation config error: ${err instanceof Error ? err.message : String(err)}`, scriptOutput),
+      agentResponse: response,
+      resolvedRequest: request,
+    };
+  }
+
+  // --- 6. Send to evaluator ---
+  const evalResult = await evaluateAgentResponse({
+    agentOutput,
+    expected: test.expected,
+    evaluate: test.evaluate,
+    evalConfig,
+    env: opts.env,
+  });
+
+  const assertMs = evalResult.durationMs;
+
+  // --- 7. Handle evaluation errors ---
+  if (evalResult.evaluationError) {
+    return {
+      name: test.name,
+      file,
+      status: 'failed',
+      durationMs: Date.now() - startMs,
+      timings: {
+        curlMs,
+        assertMs,
+        preMs: 0,
+        postMs: 0,
+        otherMs: Math.max(0, Date.now() - startMs - curlMs - assertMs),
+      },
+      assertions: {},
+      error: evalResult.evaluationError,
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    };
+  }
+
+  // --- 8. Validate criteria correspondence (Constraint 7) ---
+  const evaluatorResponse = evalResult.evaluatorResponse!;
+  try {
+    validateCriteriaCorrespondence(evaluatorResponse, test.evaluate?.criteria);
+  } catch (err) {
+    return {
+      name: test.name,
+      file,
+      status: 'failed',
+      durationMs: Date.now() - startMs,
+      timings: {
+        curlMs,
+        assertMs,
+        preMs: 0,
+        postMs: 0,
+        otherMs: Math.max(0, Date.now() - startMs - curlMs - assertMs),
+      },
+      assertions: {},
+      error: `Evaluation contract validation failed: ${err}`,
+      scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    };
+  }
+
+  // --- 9. Apply min_pass and produce EvaluationAssertionResult ---
+  const minPass = test.evaluate?.min_pass ?? 80;
+  const evaluated = evaluatorResponse.status === 'evaluated';
+  const passed = evaluated && (evaluatorResponse.grade ?? 0) >= minPass;
+
+  const evaluationResult: EvaluationAssertionResult = {
+    status: evaluatorResponse.status,
+    grade: evaluatorResponse.grade,
+    passed,
+    minPass,
+    reasoning: evaluatorResponse.reasoning,
+    criteriaResults: evaluatorResponse.criteriaResults,
+    evaluatorModel: evalConfig.model,
+    durationMs: assertMs,
+  };
+
+  const allPassed = passed;  // for agent tests, evaluation is the only assertion
+  const finalStatus: TestResult['status'] = allPassed ? 'passed' : 'failed';
+
+  const durationMs = Date.now() - startMs;
+
+  return {
+    name: test.name,
+    file,
+    status: finalStatus,
+    durationMs,
+    timings: {
+      curlMs,
+      assertMs,
+      preMs: 0,
+      postMs: 0,
+      otherMs: Math.max(0, durationMs - curlMs - assertMs),
+    },
+    assertions: { evaluation: evaluationResult },
+    scriptOutput: scriptOutput.length ? scriptOutput : undefined,
+    // Diagnostics: include on failure; omit on pass
+    ...(finalStatus === 'failed' ? {
+      agentResponse: response,
+      resolvedRequest: request,
+      evaluationRequest: evalResult.evaluationRequest,
+      evaluationResponse: evalResult.evaluationResponse ?? undefined,
+    } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent evaluation transport
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends the agent output to the evaluator and returns the raw evaluator response
+ * plus the evaluation request. Does NOT validate the evaluator's contract —
+ * that is Story 5's job.
+ *
+ * Returns:
+ *   - evaluatorResponse: the parsed EvaluatorResponse (if parsing succeeded)
+ *   - evaluationError: error message (if parsing or HTTP failed)
+ *   - evaluationRequest: the ShogunRequest sent to the evaluator
+ *   - evaluationResponse: the raw ShogunResponse from the evaluator
+ *   - durationMs: time for the evaluation HTTP call + parsing
+ */
+async function evaluateAgentResponse(args: {
+  agentOutput: string;
+  expected: AgentExpectedDef | undefined;
+  evaluate: AgentEvaluateConfig | undefined;
+  evalConfig: { endpoint: string; model: string; api_key?: string; temperature: number; timeout?: number; evaluator_system_prompt?: string };
+  env: EnvVars;
+}): Promise<{
+  evaluatorResponse: EvaluatorResponse | null;
+  evaluationError: string | null;
+  evaluationRequest: ShogunRequest;
+  evaluationResponse: ShogunResponse | null;
+  durationMs: number;
+}> {
+  const startMs = Date.now();
+
+  // Build evaluation messages
+  const messages = buildEvaluationPrompt({
+    expected: args.expected,
+    evaluate: args.evaluate,
+    agentOutput: args.agentOutput,
+    evaluatorSystemPrompt: args.evalConfig.evaluator_system_prompt,
+  });
+
+  // Build request body
+  const requestBody = {
+    model: args.evalConfig.model,
+    temperature: args.evalConfig.temperature,
+    messages,
+  };
+
+  // Build ShogunRequest
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (args.evalConfig.api_key) {
+    headers['Authorization'] = `Bearer ${args.evalConfig.api_key}`;
+  }
+
+  const evaluationRequest: ShogunRequest = {
+    method: 'POST',
+    path: args.evalConfig.endpoint,
+    url: args.evalConfig.endpoint,
+    headers,
+    params: {},
+    body: JSON.stringify(requestBody),
+  };
+
+  // Execute
+  let evaluationResponse: ShogunResponse;
+  try {
+    evaluationResponse = await executeRequest(evaluationRequest, args.env, {
+      timeout: parseInt(args.env.TIMEOUT ?? String(args.evalConfig.timeout ?? 300), 10),
+      autoInjectAuth: false,  // Constraint 3
+      contentType: 'application/json',
+    });
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: `Evaluator HTTP request failed: ${err}`,
+      evaluationRequest,
+      evaluationResponse: null,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  // Extract content from evaluator response
+  let rawContent: string;
+  try {
+    const body = typeof evaluationResponse.body === 'string'
+      ? JSON.parse(evaluationResponse.body)
+      : evaluationResponse.body;
+    rawContent = body?.choices?.[0]?.message?.content;
+    if (typeof rawContent !== 'string' || !rawContent.trim()) {
+      return {
+        evaluatorResponse: null,
+        evaluationError: 'Evaluator response missing choices[0].message.content or content is empty.',
+        evaluationRequest,
+        evaluationResponse,
+        durationMs: Date.now() - startMs,
+      };
+    }
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: `Failed to parse evaluator HTTP response: ${err}`,
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  // Parse strict JSON
+  try {
+    const evaluatorResponse = parseEvaluatorResponse(rawContent);
+    return {
+      evaluatorResponse,
+      evaluationError: null,
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  } catch (err) {
+    return {
+      evaluatorResponse: null,
+      evaluationError: String(err),
+      evaluationRequest,
+      evaluationResponse,
+      durationMs: Date.now() - startMs,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Test display helper
 // ---------------------------------------------------------------------------
 
@@ -872,6 +1263,12 @@ async function runSqlTest(
  * which don't have a `request` field.
  */
 function getTestDisplayInfo(test: TestDefinition): { method: string; path: string } {
+  if (test.type === 'agent' && test.agent) {
+    return {
+      method: 'AGENT',
+      path: test.agent.model ?? '(unknown model)',
+    };
+  }
   if (test.type === 'sql' && test.sql) {
     if (test.sql.query) {
       // Show a truncated version of the query
