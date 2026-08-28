@@ -296,14 +296,19 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
       }
     }
     if (bodyObj!.form_files) {
-      const { readFileSync } = await import('node:fs');
+      const { readFileSync, existsSync } = await import('node:fs');
+      const { basename } = await import('node:path');
       for (const [k, fileInfo] of Object.entries(bodyObj!.form_files)) {
+        if (!existsSync(fileInfo.path)) {
+          throw new Error('Multipart file attachment "' + k + '" not found: ' + fileInfo.path);
+        }
         const fileBuffer = readFileSync(fileInfo.path);
         const blob = new Blob([fileBuffer], { type: fileInfo.content_type ?? 'application/octet-stream' });
-        formData.append(k, blob, fileInfo.filename ?? fileInfo.path.split('/').pop() ?? k);
+        formData.append(k, blob, fileInfo.filename ?? basename(fileInfo.path));
       }
     }
-    ctx.log(\`  request body: multipart/form-data (\${formData.getEntries?.() ? [...formData].length : '?'} parts)\`);
+    const partCount = Array.from(formData.keys()).length;
+    ctx.log(\`  request body: multipart/form-data (\${partCount} parts)\`);
 
     const res = await fetch(url, { method, headers, body: formData });
     return __processFetchResponse(res, ctx);
@@ -498,15 +503,20 @@ async function __httpCall(method, path, body, _opts) {
     }
     if (bodyObj.form_files) {
       var fs2 = await import('node:fs');
+      var pathMod = await import('node:path');
       for (var ffk in bodyObj.form_files) {
         var fileInfo = bodyObj.form_files[ffk];
+        if (!fs2.existsSync(fileInfo.path)) {
+          throw new Error('Multipart file attachment "' + ffk + '" not found: ' + fileInfo.path);
+        }
         var fileBuffer = fs2.readFileSync(fileInfo.path);
         var blob = new Blob([fileBuffer], { type: fileInfo.content_type || 'application/octet-stream' });
-        var fname = fileInfo.filename || fileInfo.path.split('/').pop() || ffk;
+        var fname = fileInfo.filename || pathMod.basename(fileInfo.path);
         formData.append(ffk, blob, fname);
       }
     }
-    ctx.log('  request body: multipart/form-data');
+    var partCount = Array.from(formData.keys()).length;
+    ctx.log('  request body: multipart/form-data (' + partCount + ' parts)');
 
     var res = await fetch(url, { method: method, headers: headers, body: formData });
     return __processResponse(res, ctx);

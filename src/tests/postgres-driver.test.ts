@@ -119,77 +119,44 @@ describe('PostgresDriver — checkDependencies', () => {
 
 describe('PostgresDriver — named param mapping and query rewriting', () => {
 
+  const driver = new PostgresDriver();
+
   test('mapNamedParams assigns 1-based positional params', () => {
-    // We test the behavior indirectly by checking that the driver exists
-    // and can be instantiated. The actual mapping happens internally
-    // during executeQuery/executeProc, which requires a real PG connection.
-    // Instead, we test the logic here by accessing it via a subclass or
-    // direct call if possible.
-
-    // The mapNamedParams and rewriteQueryPlaceholders are private methods.
-    // We verify the logic works by testing the pattern:
-    // { name: 'Alice', age: 30 } → $1 = 'Alice', $2 = 30
-    const params = { name: 'Alice', age: 30 };
-    const keys = Object.keys(params);
-    const paramMap = new Map<string, number>();
-    for (let i = 0; i < keys.length; i++) {
-      paramMap.set(keys[i], i + 1);
-    }
-
+    const { values, paramMap } = (driver as any).mapNamedParams({ name: 'Alice', age: 30 });
     assert.equal(paramMap.get('name'), 1);
     assert.equal(paramMap.get('age'), 2);
+    assert.equal(values[0], 'Alice');
+    assert.equal(values[1], 30);
   });
 
-  test('rewriteQueryPlaceholders pattern: @paramName → $N', () => {
-    // Simulate the regex replacement used in the driver
-    const query = 'SELECT * FROM users WHERE name = @name AND age = @age';
+  test('rewriteQueryPlaceholders: @paramName → $N', () => {
     const paramMap = new Map<string, number>([['name', 1], ['age', 2]]);
-    const rewritten = query.replace(/@(\w+)/g, (match, name: string) => {
-      const pos = paramMap.get(name);
-      if (pos !== undefined) return `$${pos}`;
-      return match;
-    });
-
+    const rewritten = (driver as any).rewriteQueryPlaceholders(
+      'SELECT * FROM users WHERE name = @name AND age = @age', paramMap,
+    );
     assert.equal(rewritten, 'SELECT * FROM users WHERE name = $1 AND age = $2');
   });
 
   test('rewriteQueryPlaceholders leaves unknown @names alone', () => {
-    const query = 'SELECT @@version AS version';
     const paramMap = new Map<string, number>([]);
-    // The regex /@(\w+)/ matches @version (not @@)
-    // Actually @\w+ would match "@version" after the first @
-    // Let's test the actual behavior:
-    // "@@version" → first @ is not followed by \w (it's followed by @),
-    // second @ is followed by "version" → matches @version
-    // This is an edge case we should be aware of but it's unlikely in PG queries
-    const rewritten = query.replace(/@(\w+)/g, (match, name: string) => {
-      const pos = paramMap.get(name);
-      if (pos !== undefined) return `$${pos}`;
-      return match;
-    });
-    // @version would match but since it's not in paramMap, it stays as-is
-    assert.ok(rewritten.includes('version'));
+    const rewritten = (driver as any).rewriteQueryPlaceholders(
+      'SELECT * FROM users WHERE name = @unknown', paramMap,
+    );
+    assert.equal(rewritten, 'SELECT * FROM users WHERE name = @unknown');
+  });
+
+  test('rewriteQueryPlaceholders does not replace @@ sequences', () => {
+    const paramMap = new Map<string, number>([['version', 1]]);
+    const rewritten = (driver as any).rewriteQueryPlaceholders(
+      'SELECT @@version AS version', paramMap,
+    );
+    // @@version should NOT be rewritten to @@$1 — the negative lookbehind prevents it
+    assert.ok(!rewritten.includes('$1'), `Expected @@version to be preserved, got: ${rewritten}`);
+    assert.ok(rewritten.includes('@@version'));
   });
 
   test('splitArgs respects nested parentheses', () => {
-    // Simulate the splitArgs logic
-    const argsStr = 'name text, age integer, tags text[], custom_type(a, b)';
-    const parts: string[] = [];
-    let depth = 0;
-    let current = '';
-
-    for (const ch of argsStr) {
-      if (ch === '(') depth++;
-      if (ch === ')') depth--;
-      if (ch === ',' && depth === 0) {
-        parts.push(current);
-        current = '';
-      } else {
-        current += ch;
-      }
-    }
-    if (current.trim()) parts.push(current);
-
+    const parts = (driver as any).splitArgs('name text, age integer, tags text[], custom_type(a, b)');
     assert.equal(parts.length, 4);
     assert.equal(parts[0].trim(), 'name text');
     assert.equal(parts[1].trim(), 'age integer');
@@ -204,8 +171,9 @@ describe('PostgresDriver — named param mapping and query rewriting', () => {
 
 describe('PostgresDriver — result collection logic', () => {
 
+  const driver = new PostgresDriver();
+
   test('collectResultSets handles rows with columns from fields', () => {
-    // Simulate a pg QueryResult structure
     const mockResult = {
       rows: [
         { id: 1, name: 'Alice' },
@@ -218,16 +186,10 @@ describe('PostgresDriver — result collection logic', () => {
       rowCount: 2,
     };
 
-    // Replicate the collectResultSets logic
-    const resultSets: { columns: string[]; rows: Record<string, unknown>[] }[] = [];
-    if (mockResult.rows && mockResult.rows.length > 0) {
-      const columns = mockResult.fields.map(f => f.name);
-      resultSets.push({ columns, rows: mockResult.rows });
-    }
-
-    assert.equal(resultSets.length, 1);
-    assert.deepEqual(resultSets[0].columns, ['id', 'name']);
-    assert.equal(resultSets[0].rows.length, 2);
+    const result = (driver as any).collectResultSets(mockResult, {}, 0);
+    assert.equal(result.resultSets.length, 1);
+    assert.deepEqual(result.resultSets[0].columns, ['id', 'name']);
+    assert.equal(result.resultSets[0].rows.length, 2);
   });
 
   test('collectResultSets handles empty result set with column metadata', () => {
@@ -237,17 +199,10 @@ describe('PostgresDriver — result collection logic', () => {
       rowCount: 0,
     };
 
-    const resultSets: { columns: string[]; rows: Record<string, unknown>[] }[] = [];
-    if (mockResult.rows && mockResult.rows.length > 0) {
-      // Won't reach here
-    } else if (mockResult.fields && mockResult.fields.length > 0) {
-      const columns = mockResult.fields.map(f => f.name);
-      resultSets.push({ columns, rows: [] });
-    }
-
-    assert.equal(resultSets.length, 1);
-    assert.deepEqual(resultSets[0].columns, ['id', 'name']);
-    assert.equal(resultSets[0].rows.length, 0);
+    const result = (driver as any).collectResultSets(mockResult, {}, 0);
+    assert.equal(result.resultSets.length, 1);
+    assert.deepEqual(result.resultSets[0].columns, ['id', 'name']);
+    assert.equal(result.resultSets[0].rows.length, 0);
   });
 
   test('collectResultSets handles no results (command query)', () => {
@@ -257,30 +212,20 @@ describe('PostgresDriver — result collection logic', () => {
       rowCount: null,
     };
 
-    const resultSets: { columns: string[]; rows: Record<string, unknown>[] }[] = [];
-    if (mockResult.rows && mockResult.rows.length > 0) {
-      // Won't reach
-    } else if (mockResult.fields && mockResult.fields.length > 0) {
-      // Won't reach
-    }
-
-    assert.equal(resultSets.length, 0);
+    const result = (driver as any).collectResultSets(mockResult, {}, 0);
+    assert.equal(result.resultSets.length, 0);
   });
 
   test('rowsAffected uses rowCount for INSERT/UPDATE/DELETE', () => {
     const mockResult = { rows: [], fields: [], rowCount: 42 };
-    const rowsAffected = mockResult.rowCount !== null && mockResult.rowCount !== undefined
-      ? [mockResult.rowCount]
-      : [];
-    assert.deepEqual(rowsAffected, [42]);
+    const result = (driver as any).collectResultSets(mockResult, {}, 0);
+    assert.deepEqual(result.rowsAffected, [42]);
   });
 
   test('rowsAffected is empty when rowCount is null', () => {
     const mockResult = { rows: [], fields: [], rowCount: null };
-    const rowsAffected = mockResult.rowCount !== null && mockResult.rowCount !== undefined
-      ? [mockResult.rowCount]
-      : [];
-    assert.deepEqual(rowsAffected, []);
+    const result = (driver as any).collectResultSets(mockResult, {}, 0);
+    assert.deepEqual(result.rowsAffected, []);
   });
 });
 

@@ -138,10 +138,11 @@ export async function executeRequest(
       inline?: Record<string, unknown>;
     };
 
-    // Add text form fields
+    // Add text form fields (--form-string forces literal string, prevents
+    // curl from interpreting values starting with @ or < as file references)
     if (body.form_fields) {
       for (const [key, value] of Object.entries(body.form_fields)) {
-        curlArgs.push('-F', `${key}=${value}`);
+        curlArgs.push('--form-string', `${key}=${value}`);
       }
     }
 

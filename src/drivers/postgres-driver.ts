@@ -134,15 +134,16 @@ export class PostgresDriver implements SqlDriver {
 
   /**
    * Rewrite @paramName placeholders in a query to $N positional syntax.
-   * Handles @param at word boundaries. Does not replace @@ (escaped).
+   * Uses a negative lookbehind to avoid replacing @@ sequences
+   * (e.g. @@version, @@rowcount).
    */
   private rewriteQueryPlaceholders(query: string, paramMap: Map<string, number>): string {
-    return query.replace(/@(\w+)/g, (match, name: string) => {
+    return query.replace(/(?<!@)@(\w+)/g, (match, name: string) => {
       const pos = paramMap.get(name);
       if (pos !== undefined) {
         return `$${pos}`;
       }
-      return match; // Leave unknown @names alone (could be MSSQL-style global vars)
+      return match; // Leave unknown @names alone (could be system variables)
     });
   }
 
@@ -179,14 +180,16 @@ export class PostgresDriver implements SqlDriver {
       try {
         result = await pool.query(`CALL ${qualifiedProc}(${placeholders})`, values);
       } catch (callErr) {
-        // If CALL fails with a syntax error or "not a procedure", try SELECT (function)
+        // Only fall back to SELECT if the error indicates the object is a
+        // function, not a procedure. Match specific PostgreSQL error codes
+        // and messages — avoid overly broad string matching that could
+        // mask legitimate parameter mismatch errors.
         const errMsg = String(callErr);
-        if (
-          errMsg.includes('syntax error') ||
+        const isWrongObjectType =
           errMsg.includes('is not a procedure') ||
-          errMsg.includes('does not exist') ||
-          errMsg.includes('procedure')
-        ) {
+          errMsg.includes('42809') ||
+          (errMsg.includes('does not exist') && !errMsg.includes('parameter'));
+        if (isWrongObjectType) {
           result = await pool.query(`SELECT * FROM ${qualifiedProc}(${placeholders})`, values);
         } else {
           throw callErr;
@@ -317,12 +320,7 @@ export class PostgresDriver implements SqlDriver {
           -- Parse argument names, types, and modes
           p.proargnames AS arg_names,
           p.proallargtypes AS arg_all_types,
-          p.proargmodes AS arg_modes,
-          -- Use pg_get_functiondef for source extraction (limited here)
-          (
-            SELECT array_agg(format('%I=%s', k, ord))
-            FROM unnest(p.proargnames) WITH ORDINALITY AS t(k, ord)
-          ) AS arg_defaults
+          p.proargmodes AS arg_modes
         FROM pg_catalog.pg_proc p
         JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
         JOIN pg_catalog.pg_language l ON p.prolang = l.oid
@@ -491,12 +489,27 @@ export class PostgresDriver implements SqlDriver {
         [schema, name],
       );
 
-      if (result.rows.length === 0) {
-        // Try as a procedure (PG 11+) — pg_get_functiondef works for procedures too
-        return null;
+      if (result.rows.length > 0) {
+        return (result.rows[0] as { definition: string }).definition ?? null;
       }
 
-      return (result.rows[0] as { definition: string }).definition ?? null;
+      // pg_get_functiondef only works for functions (prokind='f').
+      // For procedures (prokind='p', PG 11+), fall back to prosrc.
+      const procResult = await pool.query(
+        `SELECT p.prosrc, p.prokind
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
+         WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind = 'p'
+         ORDER BY p.oid
+         LIMIT 1`,
+        [schema, name],
+      );
+
+      if (procResult.rows.length > 0) {
+        return (procResult.rows[0] as { prosrc: string }).prosrc ?? null;
+      }
+
+      return null;
     } finally {
       await pool.end();
     }
@@ -566,14 +579,14 @@ export class PostgresDriver implements SqlDriver {
              ELSE 'REFERENCE'
            END AS reference_type,
            CASE
-             WHEN ref_o.relname IS NOT NULL AND ref_n.nspname NOT IN ($1)
+             WHEN ref_o.relname IS NOT NULL AND ref_n.nspname != $1
                THEN true
              ELSE false
-           END AS is_cross_database,
+           END AS is_cross_schema,
            false AS is_unresolved
          FROM proc_oid
          JOIN pg_catalog.pg_depend d ON d.objid = proc_oid.oid
-         JOIN pg_catalog.pg_class ref_o ON d.refobjid = ref_o.oid
+         LEFT JOIN pg_catalog.pg_class ref_o ON d.refobjid = ref_o.oid
          LEFT JOIN pg_catalog.pg_namespace ref_n ON ref_o.relnamespace = ref_n.oid
          LEFT JOIN pg_catalog.pg_proc ref_p ON d.refobjid = ref_p.oid
          LEFT JOIN pg_catalog.pg_namespace ref_n2 ON ref_p.pronamespace = ref_n2.oid
@@ -589,7 +602,7 @@ export class PostgresDriver implements SqlDriver {
         qualifiedName: (row.qualified_name as string) || '',
         type: (row.object_type as string) || 'UNKNOWN',
         referenceType: (row.reference_type as string) || 'REFERENCE',
-        isCrossDatabase: Boolean(row.is_cross_database),
+        isCrossDatabase: Boolean(row.is_cross_schema),
         isUnresolved: Boolean(row.is_unresolved),
       }));
 
