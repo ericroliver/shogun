@@ -78,11 +78,25 @@ export async function executeRequest(
   const tmpId = randomBytes(6).toString('hex');
   const bodyOutFile = join(tmpdir(), `shogun-body-${tmpId}.tmp`);
 
+  // Detect multipart/form-data requests
+  const effectiveContentType = opts.contentType ?? 'application/json';
+  const isMultipart = effectiveContentType === 'multipart/form-data' ||
+    (req.content_type === 'multipart/form-data');
+
   const headers: Record<string, string> = {
-    'Content-Type': opts.contentType ?? 'application/json',
     'Accept': 'application/json',
     ...req.headers,
   };
+
+  // For multipart, let curl set the Content-Type with the boundary automatically.
+  // For all other content types, set it explicitly.
+  if (!isMultipart) {
+    headers['Content-Type'] = effectiveContentType;
+  } else {
+    // Remove any manually-set Content-Type so curl can auto-generate the boundary
+    delete headers['Content-Type'];
+    delete headers['content-type'];
+  }
 
   // Auto-inject AUTH_TOKEN as Bearer only when:
   //   1. auto_inject_auth is not explicitly disabled (default: true)
@@ -111,11 +125,44 @@ export async function executeRequest(
     '-D', '-',
     '-w', '\n__SHOGUN_STATUS__%{http_code}__SHOGUN_TIME__%{time_total}',
     ...(opts.followRedirects !== false ? ['-L'] : []),
-    url,
   );
 
+  // --- Body handling ---
   let bodyInFile: string | null = null;
-  if (req.body !== undefined && req.body !== null) {
+
+  if (isMultipart && req.body !== undefined && req.body !== null) {
+    // Multipart: build curl -F arguments for form fields and file attachments
+    const body = req.body as {
+      form_fields?: Record<string, string>;
+      form_files?: Record<string, { path: string; content_type?: string; filename?: string }>;
+      inline?: Record<string, unknown>;
+    };
+
+    // Add text form fields
+    if (body.form_fields) {
+      for (const [key, value] of Object.entries(body.form_fields)) {
+        curlArgs.push('-F', `${key}=${value}`);
+      }
+    }
+
+    // Add file attachments
+    if (body.form_files) {
+      for (const [key, fileInfo] of Object.entries(body.form_files)) {
+        if (!existsSync(fileInfo.path)) {
+          throw new Error(`Multipart file attachment "${key}" not found: ${fileInfo.path}`);
+        }
+        let fileArg = `${key}=@${fileInfo.path}`;
+        if (fileInfo.filename) {
+          fileArg += `;filename=${fileInfo.filename}`;
+        }
+        if (fileInfo.content_type) {
+          fileArg += `;type=${fileInfo.content_type}`;
+        }
+        curlArgs.push('-F', fileArg);
+      }
+    }
+  } else if (req.body !== undefined && req.body !== null) {
+    // JSON or other body: serialize and send via --data-binary
     const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
     const byteLen = Buffer.byteLength(bodyStr, 'utf8');
     bodyInFile = join(tmpdir(), `shogun-req-${tmpId}.tmp`);
@@ -131,6 +178,10 @@ export async function executeRequest(
     }
     curlArgs.push('--data-binary', `@${bodyInFile}`);
   }
+
+  // URL goes last
+  curlArgs.push(url);
+
   if (process.env.SHOGUN_DEBUG) {
     process.stderr.write(`[unix-backend] curl-args: ${JSON.stringify(curlArgs)}\n`);
   }

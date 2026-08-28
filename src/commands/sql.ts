@@ -97,9 +97,10 @@ export async function sql(args: SqlArgs): Promise<number> {
 
   const format = args.format ?? 'pretty';
 
-  // Lazy-load driver registry + mssql driver
+  // Lazy-load driver registry + all available drivers
   const { SqlDriverRegistry } = await import('../sql-driver.js');
   await import('../drivers/mssql-driver.js');
+  await import('../drivers/postgres-driver.js');
 
   // Dispatch to the appropriate handler
   try {

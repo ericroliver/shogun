@@ -629,8 +629,9 @@ async function runSqlCoverage(
   if (args.live && config.connections) {
     // Import driver registry + connection resolver (lazy — only for --live)
     const { SqlDriverRegistry } = await import('../../sql-driver.js');
-    // Import the MSSQL driver so it registers itself
+    // Import all available drivers so they register themselves
     await import('../../drivers/mssql-driver.js');
+    await import('../../drivers/postgres-driver.js');
     const { resolveSqlConnection } = await import('../../loader.js');
 
     // Get distinct connections used by SQL tests, or all config connections if no tests exist

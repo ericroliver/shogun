@@ -519,6 +519,7 @@ async function runHttpTest(
     headers: (req as { headers?: Record<string, string> }).headers ?? {},
     params: normalizeParams((req as { params?: Record<string, string | number | boolean> }).params ?? {}),
     body: (req as { body?: unknown }).body,
+    content_type: (req as { content_type?: string }).content_type,
   };
 
   // Pre-script
@@ -565,7 +566,7 @@ async function runHttpTest(
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
       autoInjectAuth: opts.config.defaults?.auto_inject_auth !== false,
-      contentType: opts.config.defaults?.content_type,
+      contentType: request.content_type ?? opts.config.defaults?.content_type,
     });
     if (process.env.SHOGUN_DEBUG) {
       process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
@@ -675,11 +676,12 @@ async function runSqlTest(
       `Connection "${sql.connection}" not found in config.connections`, scriptOutput);
   }
 
-  // 2. Resolve driver (import mssql driver to register it, then look up)
+  // 2. Resolve driver (import all available drivers to register them, then look up)
   try {
     await import('./drivers/mssql-driver.js');
+    await import('./drivers/postgres-driver.js');
   } catch {
-    // mssql package not installed — will fail at driver lookup with clear error
+    // driver package not installed — will fail at driver lookup with clear error
   }
 
   let driver: SqlDriver;
