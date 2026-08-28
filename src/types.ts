@@ -13,11 +13,25 @@ export type EnvVars = Record<string, string>;
 // Test Definition (parsed from YAML)
 // ---------------------------------------------------------------------------
 
+/** A file attachment for multipart/form-data requests. */
+export interface FormFile {
+  /** Path to the file to upload (relative to the YAML file location, or absolute) */
+  path: string;
+  /** Content-Type for this file part (optional, curl auto-detects by extension) */
+  content_type?: string;
+  /** Override the filename sent in the multipart part (optional, defaults to basename of path) */
+  filename?: string;
+}
+
 export interface RequestBody {
   /** Inline JSON body — supports ${VAR} interpolation */
   inline?: Record<string, unknown>;
   /** Path to a JSON fixture file (relative to the YAML file location) */
   file?: string;
+  /** Multipart form text fields (used when content_type is multipart/form-data) */
+  form_fields?: Record<string, string>;
+  /** Multipart form file attachments (used when content_type is multipart/form-data) */
+  form_files?: Record<string, FormFile>;
 }
 
 export interface RequestDef {
@@ -26,15 +40,8 @@ export interface RequestDef {
   path: string;
   headers?: Record<string, string>;
   params?: Record<string, string | number | boolean>;
-  body?: RequestBody;
-}
-
-export interface RequestDef {
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** URL path, may contain ${VAR} tokens */
-  path: string;
-  headers?: Record<string, string>;
-  params?: Record<string, string | number | boolean>;
+  /** Content-Type for this request (optional, overrides config.defaults.content_type) */
+  content_type?: string;
   body?: RequestBody;
 }
 
@@ -329,6 +336,8 @@ export interface ShogunRequest {
   headers: Record<string, string>;
   params: Record<string, string>;
   body?: unknown;
+  /** Content-Type for this request (set from RequestDef or pre-script) */
+  content_type?: string;
 }
 
 /**

@@ -191,6 +191,28 @@ npm run pkg:linux             # bun compile → bin/shogun-linux-x64
 
 ---
 
+## Engineering Principles
+
+### Cross-Platform Path Handling
+
+Use `node:path` utilities (`basename`, `join`, `dirname`) — never `String.split('/')`. Backslash paths on Windows will silently break forward-slash splitting. This applies to both server-side code and any code that may run in pre/post scripts on Windows machines.
+
+### Test What You Ship, Not a Copy of It
+
+Unit tests must call the actual implementation. Reimplementing logic inline in a test only verifies the copy, not the code. When methods are private, call them via `(obj as any).methodName(...)` — TypeScript's `private` is compile-time only and should not prevent testing real behavior.
+
+### Guard Against Silent Misclassification
+
+When falling back between execution paths based on error messages, match specific error codes or narrow phrases — never broad substrings. An overly broad match (e.g. `errMsg.includes('procedure')`) will mask legitimate failures and produce confusing secondary errors.
+
+### SQL JOINs Must Match Their Intent
+
+A `LEFT JOIN` captures optional relationships; an inner `JOIN` silently drops them. When querying catalog or dependency tables where the referenced object may be in a different table (e.g. functions in `pg_proc` vs. tables in `pg_class`), always use `LEFT JOIN` so the query doesn't lose rows before the fallback lookup can fire.
+
+---
+
+---
+
 ## What To Read Next
 
 - **If working on the engine**: read [`docs/technical/architecture.md`](docs/technical/architecture.md) then the relevant `src/` file

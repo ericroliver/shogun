@@ -278,6 +278,42 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
 
   // Always log the outgoing request so failures show full context
   ctx.log(\`\${method} \${url}\`);
+
+  // Detect multipart body (form_fields / form_files)
+  const bodyObj = body as { form_fields?: Record<string, string>; form_files?: Record<string, { path: string; content_type?: string; filename?: string }> } | undefined;
+  const isMultipart = bodyObj && typeof bodyObj === 'object' &&
+    (bodyObj.form_fields !== undefined || bodyObj.form_files !== undefined);
+
+  if (isMultipart) {
+    // Remove Content-Type so fetch sets the boundary automatically
+    delete headers['Content-Type'];
+    delete headers['content-type'];
+
+    const formData = new FormData();
+    if (bodyObj!.form_fields) {
+      for (const [k, v] of Object.entries(bodyObj!.form_fields)) {
+        formData.append(k, v);
+      }
+    }
+    if (bodyObj!.form_files) {
+      const { readFileSync, existsSync } = await import('node:fs');
+      const { basename } = await import('node:path');
+      for (const [k, fileInfo] of Object.entries(bodyObj!.form_files)) {
+        if (!existsSync(fileInfo.path)) {
+          throw new Error('Multipart file attachment "' + k + '" not found: ' + fileInfo.path);
+        }
+        const fileBuffer = readFileSync(fileInfo.path);
+        const blob = new Blob([fileBuffer], { type: fileInfo.content_type ?? 'application/octet-stream' });
+        formData.append(k, blob, fileInfo.filename ?? basename(fileInfo.path));
+      }
+    }
+    const partCount = Array.from(formData.keys()).length;
+    ctx.log(\`  request body: multipart/form-data (\${partCount} parts)\`);
+
+    const res = await fetch(url, { method, headers, body: formData });
+    return __processFetchResponse(res, ctx);
+  }
+
   if (body !== undefined) {
     ctx.log(\`  request body: \${JSON.stringify(body)}\`);
   }
@@ -292,6 +328,10 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return __processFetchResponse(res, ctx);
+}
+
+async function __processFetchResponse(res: Response, ctx: any) {
   const text = await res.text();
   let parsed: unknown = text;
   let events: { event: string; data: unknown }[] | undefined;
@@ -446,6 +486,42 @@ async function __httpCall(method, path, body, _opts) {
   }
 
   ctx.log(method + ' ' + url);
+
+  // Detect multipart body (form_fields / form_files)
+  var bodyObj = (body && typeof body === 'object') ? body : null;
+  var isMultipart = bodyObj && (bodyObj.form_fields !== undefined || bodyObj.form_files !== undefined);
+
+  if (isMultipart) {
+    delete headers['Content-Type'];
+    delete headers['content-type'];
+
+    var formData = new FormData();
+    if (bodyObj.form_fields) {
+      for (var fk in bodyObj.form_fields) {
+        formData.append(fk, bodyObj.form_fields[fk]);
+      }
+    }
+    if (bodyObj.form_files) {
+      var fs2 = await import('node:fs');
+      var pathMod = await import('node:path');
+      for (var ffk in bodyObj.form_files) {
+        var fileInfo = bodyObj.form_files[ffk];
+        if (!fs2.existsSync(fileInfo.path)) {
+          throw new Error('Multipart file attachment "' + ffk + '" not found: ' + fileInfo.path);
+        }
+        var fileBuffer = fs2.readFileSync(fileInfo.path);
+        var blob = new Blob([fileBuffer], { type: fileInfo.content_type || 'application/octet-stream' });
+        var fname = fileInfo.filename || pathMod.basename(fileInfo.path);
+        formData.append(ffk, blob, fname);
+      }
+    }
+    var partCount = Array.from(formData.keys()).length;
+    ctx.log('  request body: multipart/form-data (' + partCount + ' parts)');
+
+    var res = await fetch(url, { method: method, headers: headers, body: formData });
+    return __processResponse(res, ctx);
+  }
+
   if (body !== undefined) {
     ctx.log('  request body: ' + JSON.stringify(body));
   }
@@ -460,6 +536,10 @@ async function __httpCall(method, path, body, _opts) {
     headers: headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return __processResponse(res, ctx);
+}
+
+async function __processResponse(res, ctx) {
   var text = await res.text();
   var parsed = text;
   var events = undefined;

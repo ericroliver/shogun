@@ -228,6 +228,16 @@ export function formatHeadersForPowerShell(headers: Record<string, string>): str
 export function buildBodyArg(req: ShogunRequest): string {
   if (req.body === undefined || req.body === null) return '';
 
+  // Check for multipart/form-data — not supported on PowerShell backend
+  const contentType = req.headers?.['Content-Type'] ?? req.headers?.['content-type'] ?? '';
+  const reqBody = req.body as { form_fields?: unknown; form_files?: unknown } | undefined;
+  if (
+    contentType.toLowerCase().includes('multipart/form-data') ||
+    (reqBody && typeof reqBody === 'object' && (reqBody.form_fields !== undefined || reqBody.form_files !== undefined))
+  ) {
+    throw new Error('multipart/form-data is not supported on the PowerShell backend. Use the Unix/curl backend instead.');
+  }
+
   // Resolve body from inline/file wrapper (RequestBody schema from YAML)
   let body: unknown = req.body;
   if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
@@ -246,7 +256,6 @@ export function buildBodyArg(req: ShogunRequest): string {
   if (body === undefined || body === null || body === '') return '';
 
   // Check Content-Type for form-encoded
-  const contentType = req.headers?.['Content-Type'] ?? req.headers?.['content-type'] ?? '';
   const isFormEncoded = contentType.toLowerCase().includes('application/x-www-form-urlencoded');
 
   if (isFormEncoded && typeof body === 'object' && body !== null && !Array.isArray(body)) {

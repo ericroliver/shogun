@@ -231,9 +231,17 @@ export function listEnvFiles(envsDir: string): string[] {
 // Test definition YAML schema (Zod)
 // ---------------------------------------------------------------------------
 
+const FormFileSchema = z.object({
+  path: z.string().min(1, 'form_files.*.path is required'),
+  content_type: z.string().optional(),
+  filename: z.string().optional(),
+});
+
 const RequestBodySchema = z.object({
   inline: z.record(z.unknown()).optional(),
   file: z.string().optional(),
+  form_fields: z.record(z.string()).optional(),
+  form_files: z.record(FormFileSchema).optional(),
 }).optional();
 
 const RequestDefSchema = z.object({
@@ -241,8 +249,19 @@ const RequestDefSchema = z.object({
   path: z.string().min(1, 'request.path is required'),
   headers: z.record(z.string()).optional(),
   params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+  content_type: z.string().optional(),
   body: RequestBodySchema,
-});
+}).refine(
+  (data) => {
+    // If body has form_fields or form_files, content_type should be multipart/form-data
+    const body = data.body ?? {};
+    if ((body.form_fields || body.form_files) && data.content_type !== 'multipart/form-data') {
+      return false;
+    }
+    return true;
+  },
+  { message: 'request.content_type must be "multipart/form-data" when form_fields or form_files are used' },
+);
 
 const ResponseDefSchema = z.object({
   status: z.number().int().min(100).max(599).optional(),
