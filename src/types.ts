@@ -290,6 +290,8 @@ export interface CollectionDefinition {
    * Values declared here belong to the collection, not the .env file.
    */
   vars?: Record<string, string>;
+  /** Database snapshot management for this collection. */
+  snapshots?: CollectionSnapshotConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +687,75 @@ export interface ShogunConfig {
   coverage?: CoverageConfig;
   /** Global evaluation configuration for agent tests. */
   evaluation?: EvaluationConfig;
+  /** Database snapshot management configuration. */
+  snapshots?: SnapshotConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Database Snapshot Management
+// ---------------------------------------------------------------------------
+
+/** Provider type — determines which SnapshotProvider implementation is used. */
+export type SnapshotProviderType = 'dtai-api' | 'mssql-direct';
+
+/** Configuration for a single snapshot provider instance. */
+export interface SnapshotProviderConfig {
+  /** Provider type — dispatches to the correct implementation */
+  type: SnapshotProviderType;
+  /** Base URL for dtai-api provider (interpolated from env). Ignored for mssql-direct. */
+  base_url?: string;
+  /** Bearer token for dtai-api provider (interpolated from env). Optional — dtai may not require auth yet. */
+  auth_token?: string;
+  /** Named connection from connections: section — used by mssql-direct provider. */
+  connection?: string;
+  /** Request timeout in seconds. Default: 30 (dtai-api), 60 (mssql-direct). */
+  timeout?: number;
+}
+
+/** Top-level snapshots configuration in shogun.config.yaml. */
+export interface SnapshotConfig {
+  /** Default provider name (from providers map) used when --provider is omitted. */
+  default?: string;
+  /** Named provider instances. */
+  providers?: Record<string, SnapshotProviderConfig>;
+}
+
+/** Result of a snapshot operation. */
+export interface SnapshotResult {
+  success: boolean;
+  message: string;
+  snapshotName: string;
+}
+
+/** Metadata about an existing snapshot. */
+export interface SnapshotInfo {
+  snapshotName: string;
+  sourceDatabase: string;
+  createdTime: string;
+  sizeInBytes?: number;
+  status?: string;
+}
+
+/** Collection-level snapshot configuration in _collection.yaml. */
+export interface CollectionSnapshotConfig {
+  /** Restore a snapshot before the collection's tests run. */
+  pre_run?: {
+    /** Snapshot name to restore from */
+    restore: string;
+    /** Target database to restore into */
+    database: string;
+    /** Provider override (uses config default if omitted) */
+    provider?: string;
+  };
+  /** Create a fresh snapshot after a successful run (for "bless" runs). */
+  post_run?: {
+    /** Snapshot name to create */
+    create: string;
+    /** Source database to snapshot */
+    database: string;
+    /** Provider override (uses config default if omitted) */
+    provider?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------

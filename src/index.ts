@@ -15,6 +15,7 @@ import { spec } from './commands/spec.js';
 import { sql as sqlCmd } from './commands/sql.js';
 import { coverage } from './commands/coverage/index.js';
 import { checkBackend } from './commands/check-backend.js';
+import { db } from './commands/db.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
 import { initExecutor, checkDependencies } from './executor.js';
 import { init } from './commands/init.js';
@@ -116,6 +117,25 @@ Usage:
   shogun sql --format json           JSON output (for scripting)
   shogun sql --format markdown       Markdown table output (for docs/PRs)
 
+  shogun db snapshot create --database <db> --name <snapshot>
+                                      Create a database snapshot
+  shogun db snapshot restore --database <db> --name <snapshot>
+                                      Restore database from snapshot (--force accepted)
+  shogun db snapshot delete --name <snapshot> [--if-exists]
+                                      Delete a snapshot (idempotent with --if-exists)
+  shogun db snapshot list [--database <db>] [--format json]
+                                      List snapshots (optionally filtered by database)
+  shogun db snapshot exists --database <db> --name <snapshot>
+                                      Check if snapshot exists (exit 0/1)
+  shogun db snapshot create --env QA --database CdcTestDB --name baseline
+                                      Use specific env for provider config
+
+  shogun run --restore-snapshot <name> --snapshot-database <db>
+                                      Restore snapshot before running tests
+  shogun run --no-snapshot            Skip collection-level snapshot restore
+  shogun run --snapshot-provider <name>
+                                      Override default snapshot provider
+
   shogun --version                    Print version
   shogun --help                       Print this message
 `.trimStart();
@@ -167,6 +187,21 @@ interface ParsedArgs {
   output?: string;
   // runtime parameter override for SQL tests (JSON string, e.g. '[{"UserId": 42}]')
   params?: string;
+  // snapshot management: --restore-snapshot for `shogun run`
+  restoreSnapshot?: string;
+  // snapshot management: --no-snapshot to skip collection-level snapshot restore
+  noSnapshot?: boolean;
+  // snapshot management: --snapshot-database (used with --restore-snapshot)
+  snapshotDatabase?: string;
+  // snapshot management: --snapshot-provider (override default provider)
+  snapshotProvider?: string;
+  // db subcommand: positional args (action, snapshotAction)
+  dbAction?: string;
+  dbSnapshotAction?: string;
+  // db snapshot flags
+  database?: string;
+  snapshotName?: string;
+  ifExists?: boolean;
 }
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {};
@@ -249,7 +284,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--out':        result.out = argv[++i]; break;
       case '--force':      result.force = true; break;
       case '--output':     result.output = argv[++i]; break;
-      case '--params':     result.params = argv[++i]; break;      default:
+      case '--params':     result.params = argv[++i]; break;
+      case '--restore-snapshot': result.restoreSnapshot = argv[++i]; break;
+      case '--snapshot-database': result.snapshotDatabase = argv[++i]; break;
+      case '--snapshot-provider': result.snapshotProvider = argv[++i]; break;
+      case '--no-snapshot':      result.noSnapshot = true; break;
+      case '--database': result.database = argv[++i]; break;
+      case '--name':    result.snapshotName = argv[++i]; break;
+      case '--if-exists': result.ifExists = true; break;
+      default:
         if (arg.startsWith('--')) {
           // Unknown flag — skip the value token if it doesn't look like a flag
           // itself, then warn so the user knows the flag was not recognised.
@@ -353,6 +396,10 @@ async function main() {
         format: args.format as 'pretty' | 'json' | 'tap' | undefined,
         output: args.output,
         params: args.params,
+        restoreSnapshot: args.restoreSnapshot,
+        noSnapshot: args.noSnapshot,
+        snapshotDatabase: args.snapshotDatabase,
+        snapshotProvider: args.snapshotProvider,
       });
       process.exit(exitCode);
       break;
@@ -431,6 +478,32 @@ async function main() {
         search: args.search,
         format: args.format as 'pretty' | 'json' | 'markdown' | undefined,
         cwd: args.cwd,
+      });
+      process.exit(exitCode);
+      break;
+    }
+    case 'db': {
+      // `shogun db snapshot <action> [flags]`
+      // The first two positional args are the db action ("snapshot") and
+      // snapshot sub-action ("create", "restore", etc.).
+      const dbAction = rest[0] ?? '';
+      const dbSnapshotAction = rest[1] ?? '';
+
+      // Re-parse the remaining args (after "snapshot <action>") for flags
+      const dbRest = rest.slice(2);
+      const dbArgs = parseArgs(dbRest);
+
+      const exitCode = await db({
+        env: dbArgs.env,
+        cwd: dbArgs.cwd ?? args.cwd,
+        action: dbAction,
+        snapshotAction: dbSnapshotAction,
+        database: dbArgs.database,
+        name: dbArgs.snapshotName,
+        provider: dbArgs.snapshotProvider ?? dbArgs.specSource,
+        ifExists: dbArgs.ifExists,
+        format: dbArgs.format as 'pretty' | 'json' | undefined,
+        force: dbArgs.force,
       });
       process.exit(exitCode);
       break;

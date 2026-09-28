@@ -23,8 +23,6 @@ import type {
   SqlTestConfig,
   AgentEvaluateConfig,
 } from './types.js';
-
-// ---------------------------------------------------------------------------
 // Global config
 // ---------------------------------------------------------------------------
 
@@ -92,6 +90,17 @@ export const ShogunConfigSchema = z.object({
     model: z.string().min(1),
     temperature: z.number().optional(),
     timeout: z.number().optional(),
+  }).optional(),
+  // Database snapshot management
+  snapshots: z.object({
+    default: z.string().optional(),
+    providers: z.record(z.object({
+      type: z.enum(['dtai-api', 'mssql-direct']),
+      base_url: z.string().optional(),
+      auth_token: z.string().optional(),
+      connection: z.string().optional(),
+      timeout: z.number().optional(),
+    })).optional(),
   }).optional(),
 });
 
@@ -394,6 +403,18 @@ const CollectionDefSchema = z.object({
   setup: z.string().optional(),
   teardown: z.string().optional(),
   vars: z.record(z.string()).optional(),
+  snapshots: z.object({
+    pre_run: z.object({
+      restore: z.string(),
+      database: z.string(),
+      provider: z.string().optional(),
+    }).optional(),
+    post_run: z.object({
+      create: z.string(),
+      database: z.string(),
+      provider: z.string().optional(),
+    }).optional(),
+  }).optional(),
 });
 
 // ---------------------------------------------------------------------------

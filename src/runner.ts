@@ -35,9 +35,11 @@ import type {
   TestDefinition, SqlConnectionConfig, SqlScriptContext,
   AgentTestConfig, AgentExpectedDef, AgentEvaluateConfig, EvaluatorResponse,
   EvaluationAssertionResult,
+  CollectionSnapshotConfig,
 } from './types.js';
 import { buildEvaluationPrompt, parseEvaluatorResponse, validateCriteriaCorrespondence } from './agent-evaluator.js';
 import { resolveEvaluationConfig } from './loader.js';
+import { getSnapshotProvider, isSnapshotConfigured } from './snapshots/registry.js';
 
 export interface RunOptions {
   env?: string;
@@ -50,6 +52,14 @@ export interface RunOptions {
   cwd?: string;
   /** Runtime parameter override for SQL tests — JSON string (e.g. '[{"UserId": 42}]') */
   params?: string;
+  /** Snapshot to restore before running tests (CLI --restore-snapshot) */
+  restoreSnapshot?: string;
+  /** Skip collection-level snapshot restore (CLI --no-snapshot) */
+  noSnapshot?: boolean;
+  /** Database to restore snapshot into (CLI --snapshot-database) */
+  snapshotDatabase?: string;
+  /** Snapshot provider override (CLI --snapshot-provider) */
+  snapshotProvider?: string;
 }
 
 export async function runTests(opts: RunOptions): Promise<RunSummary> {
@@ -90,6 +100,10 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     env, vars, baseUrl, config, scriptsDir, cwd, collectionsDir,
     snapshotMode: opts.snapshotMode, session, logger,
     runtimeParams: parseRuntimeParams(opts.params),
+    restoreSnapshot: opts.restoreSnapshot,
+    noSnapshot: opts.noSnapshot,
+    snapshotDatabase: opts.snapshotDatabase,
+    snapshotProvider: opts.snapshotProvider,
   };
 
   // -------------------------------------------------------------------------
@@ -142,6 +156,29 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     }
 
     printCollectionHeader(definition.name ?? collectionName);
+
+    // Restore database snapshot before collection setup, if configured.
+    // CLI --restore-snapshot overrides collection config; --no-snapshot skips both.
+    const snapshotOk = await ensureSnapshotRestore(collectionName, definition, sharedOpts);
+    if (!snapshotOk) {
+      // Snapshot restore failed — fail all tests in this collection
+      for (const file of testFiles) {
+        const test = loadTestFile(file, env);
+        const failed: TestResult = {
+          name: test.name,
+          file,
+          status: 'failed',
+          durationMs: 0,
+          assertions: {},
+          error: `Snapshot restore failed for "${collectionName}" — tests not run against dirty database`,
+        };
+        logger.recordTest(failed, collectionName);
+        const display = getTestDisplayInfo(test);
+        printTestStart(test.name, display.method, display.path);
+        printTestResult(failed);
+      }
+      continue;
+    }
 
     // Run collection setup (includes setup_fixtures), deduped by session
     const setupOk = await ensureCollectionSetup(collectionName, definition, sharedOpts);
@@ -261,6 +298,101 @@ interface SharedRunOpts {
   logger: RunLogger;
   /** Runtime parameter override for SQL tests (parsed JSON array) */
   runtimeParams?: Record<string, unknown>[];
+  /** Snapshot to restore before tests (CLI --restore-snapshot, overrides collection config) */
+  restoreSnapshot?: string;
+  /** Skip collection-level snapshot restore (CLI --no-snapshot) */
+  noSnapshot?: boolean;
+  /** Database to restore snapshot into (CLI --snapshot-database) */
+  snapshotDatabase?: string;
+  /** Snapshot provider override (CLI --snapshot-provider) */
+  snapshotProvider?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot restore (before collection setup)
+// ---------------------------------------------------------------------------
+
+/**
+ * Restore a database snapshot before running a collection's tests.
+ *
+ * Precedence:
+ *   1. CLI --restore-snapshot (highest — overrides everything)
+ *   2. Collection config snapshots.pre_run.restore in _collection.yaml
+ *   3. --no-snapshot flag skips both (for debugging)
+ *
+ * Returns true if no snapshot was needed, or if restore succeeded.
+ * Returns false if restore was needed but failed (tests should not run).
+ */
+async function ensureSnapshotRestore(
+  collectionName: string,
+  definition: { snapshots?: CollectionSnapshotConfig },
+  opts: SharedRunOpts,
+): Promise<boolean> {
+  // --no-snapshot skips all snapshot restore
+  if (opts.noSnapshot) {
+    return true;
+  }
+
+  // Determine what snapshot to restore (if any)
+  let snapshotName: string | undefined;
+  let database: string | undefined;
+  let providerName: string | undefined;
+
+  if (opts.restoreSnapshot) {
+    // CLI --restore-snapshot overrides collection config
+    snapshotName = opts.restoreSnapshot;
+    database = opts.snapshotDatabase;
+    providerName = opts.snapshotProvider;
+  } else if (definition.snapshots?.pre_run) {
+    // Collection-level config in _collection.yaml
+    snapshotName = definition.snapshots.pre_run.restore;
+    database = definition.snapshots.pre_run.database;
+    providerName = definition.snapshots.pre_run.provider;
+  }
+
+  if (!snapshotName) {
+    // No snapshot restore configured
+    return true;
+  }
+
+  if (!database) {
+    console.error(`  ✗ Snapshot restore requested for "${collectionName}" but no database specified.`);
+    console.error('    Use --snapshot-database on CLI or set database: in snapshots.pre_run config.');
+    return false;
+  }
+
+  // Check if snapshot management is configured
+  if (!isSnapshotConfigured(opts.config)) {
+    console.error(`  ✗ Snapshot restore requested but no snapshot providers configured.`);
+    console.error('    Add a snapshots: section to shogun.config.yaml.');
+    return false;
+  }
+
+  // Get provider and restore
+  let provider;
+  try {
+    provider = getSnapshotProvider(opts.config, opts.env, providerName);
+  } catch (err) {
+    console.error(`  ✗ Failed to initialize snapshot provider: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+
+  if (!provider) {
+    console.error(`  ✗ Could not resolve snapshot provider.`);
+    console.error('    Specify --snapshot-provider <name> or set snapshots.default in shogun.config.yaml.');
+    return false;
+  }
+
+  console.log(`  📸 Restoring snapshot "${snapshotName}" → database "${database}"...`);
+  const result = await provider.restore(database, snapshotName);
+
+  if (result.success) {
+    console.log(`  ✓ ${result.message}`);
+    return true;
+  }
+
+  console.error(`  ✗ ${result.message}`);
+  return false;
 }
 
 // ---------------------------------------------------------------------------
