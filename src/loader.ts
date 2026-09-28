@@ -102,6 +102,16 @@ export const ShogunConfigSchema = z.object({
       timeout: z.number().optional(),
     })).optional(),
   }).optional(),
+  // Change Data Capture (CDC) management
+  cdc: z.object({
+    default: z.string().optional(),
+    providers: z.record(z.object({
+      type: z.enum(['dtai-api']),
+      base_url: z.string().optional(),
+      auth_token: z.string().optional(),
+      timeout: z.number().optional(),
+    })).optional(),
+  }).optional(),
 });
 
 export function loadConfig(cwd: string = process.cwd()): ShogunConfig {
@@ -412,6 +422,20 @@ const CollectionDefSchema = z.object({
     post_run: z.object({
       create: z.string(),
       database: z.string(),
+      provider: z.string().optional(),
+    }).optional(),
+  }).optional(),
+  cdc: z.object({
+    pre_run: z.object({
+      session: z.string(),
+      tablesToInclude: z.array(z.string()).optional(),
+      tablesToExclude: z.array(z.string()).optional(),
+      provider: z.string().optional(),
+    }).optional(),
+    post_run: z.object({
+      session: z.string(),
+      capture: z.string(),
+      captureType: z.string().optional(),
       provider: z.string().optional(),
     }).optional(),
   }).optional(),

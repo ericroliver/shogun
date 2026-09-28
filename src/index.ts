@@ -16,6 +16,7 @@ import { sql as sqlCmd } from './commands/sql.js';
 import { coverage } from './commands/coverage/index.js';
 import { checkBackend } from './commands/check-backend.js';
 import { db } from './commands/db.js';
+import { cdc } from './commands/cdc.js';
 import { createBackend, getBackendSource } from './backend-factory.js';
 import { initExecutor, checkDependencies } from './executor.js';
 import { init } from './commands/init.js';
@@ -136,6 +137,15 @@ Usage:
   shogun run --snapshot-provider <name>
                                       Override default snapshot provider
 
+  shogun cdc start --session <name> [--include <table>...] [--exclude <table>...]
+                                      Start CDC monitoring on the database
+  shogun cdc stop --session <name> --capture <name> [--type <type>]
+                                      Stop CDC, capture data, disable CDC
+  shogun cdc capture --session <name> --capture <name> [--type <type>]
+                                      Capture CDC data without stopping
+  shogun cdc compare --baseline <name> --test <name>
+                                      Compare two CDC captures
+
   shogun --version                    Print version
   shogun --help                       Print this message
 `.trimStart();
@@ -202,6 +212,17 @@ interface ParsedArgs {
   database?: string;
   snapshotName?: string;
   ifExists?: boolean;
+  // cdc subcommand flags
+  session?: string;
+  capture?: string;
+  captureType?: string;
+  tablesToInclude?: string[];
+  tablesToExclude?: string[];
+  baselineCapture?: string;
+  testCapture?: string;
+  fieldsToIgnore?: string[];
+  ignoreLsnDifferences?: boolean;
+  cdcProvider?: string;
 }
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {};
@@ -292,6 +313,32 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--database': result.database = argv[++i]; break;
       case '--name':    result.snapshotName = argv[++i]; break;
       case '--if-exists': result.ifExists = true; break;
+      // CDC flags
+      case '--session':   result.session = argv[++i]; break;
+      case '--capture':   result.capture = argv[++i]; break;
+      case '--type':      result.captureType = argv[++i]; break;
+      case '--include':   {
+        const v = result.tablesToInclude ?? [];
+        v.push(argv[++i]!);
+        result.tablesToInclude = v;
+        break;
+      }
+      case '--exclude':   {
+        const v = result.tablesToExclude ?? [];
+        v.push(argv[++i]!);
+        result.tablesToExclude = v;
+        break;
+      }
+      case '--baseline':  result.baselineCapture = argv[++i]; break;
+      case '--test':      result.testCapture = argv[++i]; break;
+      case '--ignore-field': {
+        const v = result.fieldsToIgnore ?? [];
+        v.push(argv[++i]!);
+        result.fieldsToIgnore = v;
+        break;
+      }
+      case '--no-ignore-lsn': result.ignoreLsnDifferences = false; break;
+      case '--cdc-provider':  result.cdcProvider = argv[++i]; break;
       default:
         if (arg.startsWith('--')) {
           // Unknown flag — skip the value token if it doesn't look like a flag
@@ -504,6 +551,30 @@ async function main() {
         ifExists: dbArgs.ifExists,
         format: dbArgs.format as 'pretty' | 'json' | undefined,
         force: dbArgs.force,
+      });
+      process.exit(exitCode);
+      break;
+    }
+    case 'cdc': {
+      // `shogun cdc <action> [flags]`
+      const cdcAction = rest[0] as 'start' | 'stop' | 'capture' | 'compare' | undefined;
+      const cdcRest = rest.slice(1);
+      const cdcArgs = parseArgs(cdcRest);
+
+      const exitCode = await cdc({
+        action: cdcAction ?? 'start',
+        session: cdcArgs.session,
+        capture: cdcArgs.capture,
+        captureType: cdcArgs.captureType,
+        tablesToInclude: cdcArgs.tablesToInclude,
+        tablesToExclude: cdcArgs.tablesToExclude,
+        baselineCapture: cdcArgs.baselineCapture,
+        testCapture: cdcArgs.testCapture,
+        fieldsToIgnore: cdcArgs.fieldsToIgnore,
+        ignoreLsnDifferences: cdcArgs.ignoreLsnDifferences,
+        provider: cdcArgs.cdcProvider ?? cdcArgs.specSource,
+        envFile: cdcArgs.env,
+        cwd: cdcArgs.cwd ?? args.cwd,
       });
       process.exit(exitCode);
       break;

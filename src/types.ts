@@ -292,6 +292,8 @@ export interface CollectionDefinition {
   vars?: Record<string, string>;
   /** Database snapshot management for this collection. */
   snapshots?: CollectionSnapshotConfig;
+  /** Change Data Capture (CDC) management for this collection. */
+  cdc?: CollectionCdcConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +691,9 @@ export interface ShogunConfig {
   evaluation?: EvaluationConfig;
   /** Database snapshot management configuration. */
   snapshots?: SnapshotConfig;
+
+  /** Change Data Capture (CDC) management configuration. */
+  cdc?: CdcConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +758,107 @@ export interface CollectionSnapshotConfig {
     create: string;
     /** Source database to snapshot */
     database: string;
+    /** Provider override (uses config default if omitted) */
+    provider?: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Change Data Capture (CDC) Management
+// ---------------------------------------------------------------------------
+
+/** CDC provider type — determines which CdcProvider implementation is used. */
+export type CdcProviderType = 'dtai-api';
+
+/** Configuration for a single CDC provider instance. */
+export interface CdcProviderConfig {
+  /** Provider type — dispatches to the correct implementation */
+  type: CdcProviderType;
+  /** Base URL for dtai-api provider (interpolated from env). */
+  base_url?: string;
+  /** Bearer token for dtai-api provider (interpolated from env). Optional. */
+  auth_token?: string;
+  /** Request timeout in seconds. Default: 30. */
+  timeout?: number;
+}
+
+/** Top-level CDC configuration in shogun.config.yaml. */
+export interface CdcConfig {
+  /** Default provider name (from providers map) used when --provider is omitted. */
+  default?: string;
+  /** Named provider instances. */
+  providers?: Record<string, CdcProviderConfig>;
+}
+
+/** Result of a CDC start operation. */
+export interface CdcStartResult {
+  success: boolean;
+  sessionName: string;
+  message: string;
+  tablesEnabled: string[];
+  tablesSkipped: string[];
+  errors: string[];
+}
+
+/** Result of a CDC stop or capture operation. */
+export interface CdcCaptureResult {
+  success: boolean;
+  sessionName: string;
+  captureName: string;
+  captureType?: string;
+  message: string;
+  tablesWithChanges: string[];
+  totalRecords: number;
+  captureId?: string;
+  errors: string[];
+}
+
+/** Result of a CDC compare operation. */
+export interface CdcCompareResult {
+  isMatch: boolean;
+  failures: CdcComparisonFailure[];
+  summary: {
+    tablesCompared: number;
+    recordsCompared: number;
+    fieldsCompared: number;
+    totalFailures: number;
+    tablesWithFailures: number;
+  };
+  errors: string[];
+}
+
+/** A single comparison failure between two CDC captures. */
+export interface CdcComparisonFailure {
+  tableName: string;
+  failureType: string;
+  primaryKey?: unknown;
+  fieldName?: string;
+  baselineValue?: unknown;
+  testValue?: unknown;
+  description: string;
+}
+
+/** Collection-level CDC configuration in _collection.yaml. */
+export interface CollectionCdcConfig {
+  /** Start CDC before the collection's tests run. */
+  pre_run?: {
+    /** CDC session name (required) */
+    session: string;
+    /** Tables to include (optional — all user tables if omitted) */
+    tablesToInclude?: string[];
+    /** Tables to exclude (optional) */
+    tablesToExclude?: string[];
+    /** Provider override (uses config default if omitted) */
+    provider?: string;
+  };
+  /** Stop CDC and capture data after the collection's tests run. */
+  post_run?: {
+    /** CDC session name (must match pre_run session) */
+    session: string;
+    /** Name for this capture */
+    capture: string;
+    /** Capture type: "Baseline", "Replay", "Optimized", etc. Default: "Baseline" */
+    captureType?: string;
     /** Provider override (uses config default if omitted) */
     provider?: string;
   };
