@@ -323,10 +323,21 @@ async function __httpCall(method: string, path: string, body?: unknown, _opts?: 
   }
   ctx.log(\`  request headers: \${JSON.stringify(safeHeaders)}\`);
 
+  // Form-encoded: URL-encode the body instead of JSON.stringify.
+  // Skip null/undefined fields — form-encoded can't represent true null.
+  const _ct = headers['Content-Type'] ?? headers['content-type'] ?? '';
+  const _isFormEnc = _ct.toLowerCase().includes('application/x-www-form-urlencoded');
+  const _bodyToSend = (_isFormEnc && body !== undefined && body !== null && typeof body === 'object' && !Array.isArray(body))
+    ? Object.entries(body as Record<string, unknown>)
+        .filter(([, v]) => v !== null && v !== undefined)
+        .map(([k, v]) => \`\${encodeURIComponent(k)}=\${encodeURIComponent(String(v))}\`)
+        .join('&')
+    : (body !== undefined ? JSON.stringify(body) : undefined);
+
   const res = await fetch(url, {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: _bodyToSend,
   });
   return __processFetchResponse(res, ctx);
 }
@@ -531,10 +542,26 @@ async function __httpCall(method, path, body, _opts) {
   }
   ctx.log('  request headers: ' + JSON.stringify(safeHeaders));
 
+  // Form-encoded: URL-encode the body instead of JSON.stringify.
+  // Skip null/undefined fields — form-encoded can't represent true null.
+  var _ct = (headers['Content-Type'] || headers['content-type'] || '');
+  var _isFormEnc = _ct.toLowerCase().indexOf('application/x-www-form-urlencoded') !== -1;
+  var _bodyToSend;
+  if (_isFormEnc && body !== undefined && body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    var _formPairs = [];
+    for (var _fk in body) {
+      if (body[_fk] === null || body[_fk] === undefined) continue;
+      _formPairs.push(encodeURIComponent(_fk) + '=' + encodeURIComponent(String(body[_fk])));
+    }
+    _bodyToSend = _formPairs.join('&');
+  } else {
+    _bodyToSend = body !== undefined ? JSON.stringify(body) : undefined;
+  }
+
   var res = await fetch(url, {
     method: method,
     headers: headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: _bodyToSend,
   });
   return __processResponse(res, ctx);
 }

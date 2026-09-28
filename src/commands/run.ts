@@ -14,6 +14,10 @@ export interface RunArgs {
   format?: 'pretty' | 'json' | 'tap';
   output?: string;
   params?: string;
+  restoreSnapshot?: string;
+  noSnapshot?: boolean;
+  snapshotDatabase?: string;
+  snapshotProvider?: string;
 }
 
 export async function run(args: RunArgs): Promise<number> {
@@ -26,6 +30,10 @@ export async function run(args: RunArgs): Promise<number> {
       file: args.file,
       format: args.format,
       params: args.params,
+      restoreSnapshot: args.restoreSnapshot,
+      noSnapshot: args.noSnapshot,
+      snapshotDatabase: args.snapshotDatabase,
+      snapshotProvider: args.snapshotProvider,
     });
 
     // Write JSON output to file (for Playwright and other integrations)
