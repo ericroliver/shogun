@@ -37,6 +37,7 @@ import type {
 } from '../backend-interface.js';
 
 import { parseSseResponse, isSseContentType, getAssertionBody } from '../sse.js';
+import { resolveRequestBody, isFormEncodedContentType, buildFormEncodedBody } from '../body-utils.js';
 
 // ===========================================================================
 // Types
@@ -239,32 +240,19 @@ export function buildBodyArg(req: ShogunRequest): string {
   }
 
   // Resolve body from inline/file wrapper (RequestBody schema from YAML)
-  let body: unknown = req.body;
-  if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
-    const rb = body as { inline?: unknown; file?: string };
-    if (rb.inline !== undefined) {
-      body = rb.inline;
-    } else if (rb.file !== undefined) {
-      try {
-        body = readFileSync(rb.file, 'utf8');
-      } catch {
-        body = '';
-      }
-    }
-  }
+  // Uses the shared resolveRequestBody so both backends behave identically.
+  let body: unknown = resolveRequestBody(req.body);
 
   if (body === undefined || body === null || body === '') return '';
 
   // Check Content-Type for form-encoded
-  const isFormEncoded = contentType.toLowerCase().includes('application/x-www-form-urlencoded');
+  const isFormEncoded = isFormEncodedContentType(contentType);
 
   if (isFormEncoded && typeof body === 'object' && body !== null && !Array.isArray(body)) {
-    // Build URL-encoded form body string for HttpWebRequest
-    const entries = Object.entries(body as Record<string, unknown>);
-    if (entries.length === 0) return '';
-    const pairs = entries
-      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-      .join('&');
+    // Build URL-encoded form body string, skipping null/undefined values.
+    // See buildFormEncodedBody() for why nulls are omitted, not sent as "null".
+    const pairs = buildFormEncodedBody(body as Record<string, unknown>);
+    if (pairs === '') return '';
     // $bodyStr is used later in the HttpWebRequest script
     return `$bodyStr = '${escapeForPowerShell(pairs)}'`;
   }
