@@ -715,6 +715,10 @@ export interface SnapshotProviderConfig {
   connection?: string;
   /** Request timeout in seconds. Default: 30 (dtai-api), 60 (mssql-direct). */
   timeout?: number;
+  /** Timeout for restore operations in seconds (includes polling). Default: 120. */
+  restore_timeout?: number;
+  /** Polling interval in seconds when waiting for restore to complete. Default: 2. */
+  restore_poll_interval?: number;
 }
 
 /** Top-level snapshots configuration in shogun.config.yaml. */

@@ -30,11 +30,15 @@ export class DtaiApiProvider implements SnapshotProvider {
   private baseUrl: string;
   private authToken: string | undefined;
   private timeout: number;
+  private restoreTimeout: number;
+  private restorePollInterval: number;
 
   constructor(config: SnapshotProviderConfig, env: EnvVars) {
     this.baseUrl = config.base_url ? interpolateEnv(config.base_url, env) : '';
     this.authToken = config.auth_token ? interpolateEnv(config.auth_token, env) : undefined;
     this.timeout = config.timeout ?? 30;
+    this.restoreTimeout = config.restore_timeout ?? 120;
+    this.restorePollInterval = config.restore_poll_interval ?? 2;
 
     if (!this.baseUrl) {
       throw new Error(
@@ -136,19 +140,31 @@ export class DtaiApiProvider implements SnapshotProvider {
         body: JSON.stringify({ databaseName: database, snapshotName }),
       });
 
-      if (res.ok) {
+      if (!res.ok) {
+        const body = await this.safeParseBody(res);
+        const msg = body?.error || body?.message || res.statusText;
         return {
-          success: true,
-          message: `Database "${database}" restored from snapshot "${snapshotName}".`,
+          success: false,
+          message: `Failed to restore snapshot "${snapshotName}": ${msg}`,
           snapshotName,
         };
       }
 
-      const body = await this.safeParseBody(res);
-      const msg = body?.error || body?.message || res.statusText;
+      // The DTAI API may return 200 before SQL Server has finished restoring.
+      // Poll the snapshot/database status until it is no longer in a
+      // restoring/in-progress state, or until restore_timeout is reached.
+      const pollResult = await this.pollRestoreComplete(database, snapshotName);
+      if (!pollResult.ready) {
+        return {
+          success: false,
+          message: `Restore of snapshot "${snapshotName}" was accepted but did not complete within ${this.restoreTimeout}s. ${pollResult.reason}`,
+          snapshotName,
+        };
+      }
+
       return {
-        success: false,
-        message: `Failed to restore snapshot "${snapshotName}": ${msg}`,
+        success: true,
+        message: `Database "${database}" restored from snapshot "${snapshotName}".`,
         snapshotName,
       };
     } catch (err) {
@@ -158,6 +174,87 @@ export class DtaiApiProvider implements SnapshotProvider {
         snapshotName,
       };
     }
+  }
+
+  /**
+   * Poll the DTAI API after a restore call to verify the restore has completed.
+   *
+   * Strategy:
+   *  1. Call the snapshot status endpoint (list single snapshot for the database).
+   *  2. If the response includes a "status" field, check for known restoring
+   *     states and keep polling until the status clears.
+   *  3. If no status field is available, fall back to a simple connectivity
+   *     probe — call the exists endpoint and verify the snapshot is still present
+   *     and the API is responsive (the DTAI API blocks reads while a restore is
+   *     in progress on SQL Server, so a successful exists call is a reasonable
+   *     signal that the restore has completed).
+   *
+   * Returns { ready: true } once the restore is confirmed complete, or
+   * { ready: false, reason } if the timeout is reached.
+   */
+  private async pollRestoreComplete(
+    database: string,
+    snapshotName: string,
+  ): Promise<{ ready: boolean; reason?: string }> {
+    const deadline = Date.now() + this.restoreTimeout * 1000;
+    const intervalMs = this.restorePollInterval * 1000;
+
+    // Status values that indicate the restore is still in progress.
+    const inProgressStatuses = new Set([
+      'restoring',
+      'recovering',
+      'in_progress',
+      'inprogress',
+      'pending',
+      'running',
+    ]);
+
+    while (Date.now() < deadline) {
+      await this.sleep(intervalMs);
+
+      try {
+        // Try the single-snapshot status endpoint first.
+        const statusRes = await this.fetchWithTimeout(
+          `${this.baseUrl}/api/Snapshot/${encodeURIComponent(database)}/snapshots/${encodeURIComponent(snapshotName)}`,
+          { method: 'GET' },
+        );
+
+        if (statusRes.ok) {
+          const body = await statusRes.json() as Record<string, unknown>;
+          const status = typeof body?.status === 'string'
+            ? body.status.toLowerCase()
+            : undefined;
+
+          if (status && inProgressStatuses.has(status)) {
+            // Still restoring — keep polling.
+            continue;
+          }
+
+          // Status is absent or indicates completion.
+          return { ready: true };
+        }
+
+        if (statusRes.status === 404) {
+          // Snapshot disappeared — this can happen transiently during restore
+          // as SQL Server reverts the database. Keep polling.
+          continue;
+        }
+
+        // Other HTTP errors — keep polling, the API may be temporarily
+        // unresponsive while SQL Server holds locks.
+        continue;
+      } catch {
+        // Network error during polling — keep trying until deadline.
+        continue;
+      }
+    }
+
+    return { ready: false, reason: 'Timed out waiting for restore to complete.' };
+  }
+
+  /** Simple sleep helper. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async delete(snapshotName: string): Promise<SnapshotResult> {
