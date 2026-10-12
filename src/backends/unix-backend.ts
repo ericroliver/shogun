@@ -29,6 +29,7 @@ import type {
 import type { BackendExecutor, DependencyCheck } from '../backend-interface.js';
 import { sanitizeName } from '../loader.js';
 import { parseSseResponse, isSseContentType, getAssertionBody } from '../sse.js';
+import { resolveRequestBody, isFormEncodedContentType, buildFormEncodedBody } from '../body-utils.js';
 
 // ===========================================================================
 // AssertContext — moved from asserter.ts (local type, reused here)
@@ -163,8 +164,22 @@ export async function executeRequest(
       }
     }
   } else if (req.body !== undefined && req.body !== null) {
-    // JSON or other body: serialize and send via --data-binary
-    const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    // Resolve the RequestBody wrapper ({ inline: ... } or { file: ... }) to
+    // the actual body value. Pre-script mutations may set a direct object,
+    // which resolveRequestBody passes through unchanged.
+    const resolvedBody = resolveRequestBody(req.body);
+
+    // Check if this is a form-urlencoded request
+    const isFormEncoded = isFormEncodedContentType(effectiveContentType);
+
+    let bodyStr: string;
+    if (isFormEncoded && typeof resolvedBody === 'object' && resolvedBody !== null && !Array.isArray(resolvedBody)) {
+      // URL-encode the body, skipping null/undefined values.
+      // See buildFormEncodedBody() for why nulls are omitted, not sent as "null".
+      bodyStr = buildFormEncodedBody(resolvedBody as Record<string, unknown>);
+    } else {
+      bodyStr = typeof resolvedBody === 'string' ? resolvedBody : JSON.stringify(resolvedBody);
+    }
     const byteLen = Buffer.byteLength(bodyStr, 'utf8');
     bodyInFile = join(tmpdir(), `shogun-req-${tmpId}.tmp`);
     writeFileSync(bodyInFile, bodyStr, 'utf8');
