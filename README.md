@@ -23,10 +23,17 @@ No HTTP client libraries. No heavy test frameworks. Just the tools you already h
 - [Environment Files](#environment-files)
 - [Test Definition Format](#test-definition-format)
 - [Collections](#collections)
+  - [Setup Fixtures](#setup-fixtures)
+  - [Collection Snapshots](#collection-snapshots)
 - [Suites](#suites)
+  - [Suite Vars](#suite-vars)
+  - [Pre-Suite Validation](#pre-suite-validation)
 - [Snapshots](#snapshots)
+- [Database Snapshot Management](#database-snapshot-management)
+- [Change Data Capture (CDC)](#change-data-capture-cdc)
 - [Pre/Post Script Context](#prepost-script-context-ctx)
 - [SSE (Server-Sent Events)](#sse-server-sent-events)
+- [Verbose Logging](#verbose-logging)
 - [Run Logs](#run-logs)
 - [Backends](#backends)
 - [Commands](#commands)
@@ -39,6 +46,8 @@ No HTTP client libraries. No heavy test frameworks. Just the tools you already h
   - [spec](#spec)
   - [coverage](#coverage)
   - [sql](#sql-1)
+  - [db](#db)
+  - [cdc](#cdc-1)
   - [check-backend](#check-backend)
 - [CI Integration](#ci-integration)
 - [Project Structure](#project-structure)
@@ -113,6 +122,9 @@ shogun run --suite smoke --env local
 
 # 5. Capture snapshot baselines for the first time
 shogun snapshot --env local
+
+# 6. Run with full request/response logging
+shogun run --env local --verbose
 ```
 
 ---
@@ -379,6 +391,29 @@ evaluation:
   temperature: 0
   timeout: 300
 
+# Database snapshot management (for shogun db and --restore-snapshot)
+snapshots:
+  default: dtai-api        # default provider name
+  providers:
+    dtai-api:
+      type: dtai-api
+      base_url: ${SNAPSHOT_API_URL}
+      timeout: 30
+      restore_timeout: 120  # seconds — includes polling wait
+      restore_poll_interval: 2  # seconds between status checks
+    mssql-direct:
+      type: mssql-direct
+      connection: qa-db
+      timeout: 60
+
+# Change Data Capture (CDC) management
+cdc:
+  default: dtai-api
+  providers:
+    dtai-api:
+      type: dtai-api
+      base_url: ${SNAPSHOT_API_URL}
+
 # Coverage configuration (optional)
 coverage:
   defaultSuite: smoke
@@ -388,6 +423,7 @@ reporting:
   format: pretty           # pretty | json | tap
   on_fail: diff            # diff | body | silent
   save_passing_logs: true
+  verbose: false            # log full request/response for every test
 ```
 
 ### `shogun init`
@@ -505,6 +541,14 @@ order:
   - get-agent-by-name
   - delete-agent
 
+# Shared setup fixtures — run before this collection's own setup
+setup_fixtures:
+  - workspace-load
+
+# Collection-level vars — seeded into ctx.vars before setup
+vars:
+  WORKSPACE_NAME: api-testapp-1
+
 # Runs once before first test — ctx.vars available to all tests
 setup: |
   ctx.vars.testAgentName = `shogun-${Date.now()}`;
@@ -515,7 +559,62 @@ teardown: |
   if (ctx.vars.createdAgentName) {
     await ctx.http.delete(`/api/agents/${ctx.vars.createdAgentName}`);
   }
+
+# Collection-level snapshot restore (see Collection Snapshots below)
+snapshots:
+  pre_run:
+    restore: baseline-v1
+    database: QA
 ```
+
+### Setup Fixtures
+
+Setup fixtures are reusable, named setup scripts shared across multiple collections. They live in `tests/setup-fixtures/` and are referenced via `setup_fixtures: [...]` in `_collection.yaml`.
+
+```yaml
+# tests/setup-fixtures/workspace-load.yaml
+name: workspace-load
+description: Loads a workspace and stashes its name in ctx.vars
+script: |
+  const wsName = ctx.vars.WORKSPACE_NAME ?? ctx.env.WORKSPACE_NAME;
+  ctx.assert(!!wsName, 'WORKSPACE_NAME is required');
+  ctx.vars.workspaceName = wsName;
+  ctx.log(`Workspace: ${wsName}`);
+```
+
+Fixtures are **idempotent** — they run at most once per session. Guard with `ctx.vars._fixtureLoaded_{name}` to prevent re-execution when a fixture is used by multiple collections in the same run.
+
+### Collection Snapshots
+
+Restore a database snapshot before a collection's tests run — useful for ensuring a clean database state before write tests.
+
+```yaml
+# _collection.yaml
+snapshots:
+  pre_run:
+    restore: baseline-v1     # snapshot name to restore
+    database: QA              # target database
+    # provider: dtai-api      # optional — override default provider
+```
+
+**Precedence (highest priority first):**
+
+1. `--restore-snapshot <name>` CLI flag (overrides collection config)
+2. `snapshots.pre_run` in `_collection.yaml`
+3. `--no-snapshot` CLI flag (skips all snapshot restore)
+
+```bash
+# Restore a specific snapshot before running tests
+shogun run --restore-snapshot baseline-v1 --snapshot-database QA
+
+# Skip snapshot restore (for debugging against dirty state)
+shogun run --no-snapshot
+
+# Override the snapshot provider
+shogun run --restore-snapshot baseline-v1 --snapshot-provider mssql-direct
+```
+
+> **Snapshot fatigue:** Read-only collections that don't modify the database can skip snapshot restore entirely — either by omitting `snapshots.pre_run` in their `_collection.yaml` or using `--no-snapshot`.
 
 ---
 
@@ -537,6 +636,47 @@ tags:
 shogun run --suite smoke
 ```
 
+### Suite Vars
+
+Suite-level variables are pre-seeded into `ctx.vars` at run start, before any collection setup fires. Suite vars are overridden by collection vars on collision.
+
+```yaml
+# tests/suites/api-testapp-1.yaml
+name: API Test App 1
+collections:
+  - system
+  - agents
+vars:
+  WORKSPACE_NAME: api-testapp-1
+  TEST_PREFIX: e2e-app1
+```
+
+This is useful when multiple suites test the same collections but with different parameters (e.g., different workspace names per suite).
+
+### Pre-Suite Validation
+
+A suite can declare a `validate` property — a shell command that must exit 0 for the suite to proceed. This runs after env loading and before any collection setup, making it ideal for environment sanity checks.
+
+```yaml
+# tests/suites/smoke.yaml
+name: Smoke Suite
+collections:
+  - system
+  - agents
+validate: "curl -sf ${BASE_URL}/health || exit 1"
+```
+
+On non-zero exit, the suite aborts immediately with an error message containing the exit code and stderr output. Environment variables from the loaded `.env` file are available to the command.
+
+```yaml
+# More examples
+validate: "curl -sf ${BASE_URL}/health"
+validate: "docker exec db-test pg_isready -q"
+validate: "node -e \"require('./scripts/check-env.js')\""
+```
+
+The command is executed via `sh -c` with a 60-second timeout.
+
 ---
 
 ## Snapshots
@@ -549,6 +689,9 @@ shogun snapshot --env QA
 
 # Update a single test's baseline
 shogun snapshot --file tests/collections/agents/get-agents.yaml
+
+# Snapshot with suite vars (e.g., WORKSPACE_NAME)
+shogun snapshot --suite api-testapp-1
 
 # Normal run — diffs against committed baselines
 shogun run --env QA
@@ -564,6 +707,100 @@ On first run with `snapshot: true` and no baseline, the test is marked **needs_b
 |------|----------|
 | `strict` (default) | Any difference between actual and baseline fails the test |
 | `relaxed` | Extra columns in the actual result that aren't in the baseline are ignored — useful for forward-compatible schema changes |
+
+---
+
+## Database Snapshot Management
+
+Shogun can manage database snapshots directly — create, restore, delete, list, and check existence. This is useful for setting up clean test databases before a run.
+
+**Configuration** (in `shogun.config.yaml`):
+
+```yaml
+snapshots:
+  default: dtai-api
+  providers:
+    dtai-api:
+      type: dtai-api
+      base_url: ${SNAPSHOT_API_URL}
+      timeout: 30
+      restore_timeout: 120        # seconds — includes polling wait
+      restore_poll_interval: 2    # seconds between status checks
+    mssql-direct:
+      type: mssql-direct
+      connection: qa-db
+      timeout: 60
+```
+
+**Commands:**
+
+```bash
+# Create a snapshot
+shogun db snapshot create --database MyDB --name baseline-v1
+
+# Restore a snapshot (polls until restore is complete)
+shogun db snapshot restore --database MyDB --name baseline-v1
+
+# Delete a snapshot
+shogun db snapshot delete --name baseline-v1
+shogun db snapshot delete --name baseline-v1 --if-exists   # idempotent
+
+# List snapshots
+shogun db snapshot list
+shogun db snapshot list --database MyDB
+shogun db snapshot list --format json
+
+# Check if a snapshot exists (exit 0/1)
+shogun db snapshot exists --database MyDB --name baseline-v1
+
+# Use a specific environment for provider config
+shogun db snapshot create --env QA --database CdcTestDB --name baseline
+```
+
+> **Restore polling:** The DTAI API provider polls the restore status at `restore_poll_interval` seconds until the database is fully restored or `restore_timeout` is reached. This prevents race conditions where the API returns 200 OK before the SQL Server restore is actually complete.
+
+---
+
+## Change Data Capture (CDC)
+
+CDC monitoring tracks database changes between two points in time — useful for verifying that a test triggered the expected database writes.
+
+**Configuration** (in `shogun.config.yaml`):
+
+```yaml
+cdc:
+  default: dtai-api
+  providers:
+    dtai-api:
+      type: dtai-api
+      base_url: ${SNAPSHOT_API_URL}
+```
+
+**Workflow:**
+
+```bash
+# 1. Start CDC monitoring on a database
+shogun cdc start --session my-test --database MyDB \
+  --include Users --include Orders
+
+# 2. Run your tests (shogun run --suite write-tests)
+
+# 3. Stop CDC and capture the data
+shogun cdc stop --session my-test --capture after-write
+
+# 4. Compare two captures
+shogun cdc compare --baseline before-write --test after-write
+```
+
+**Commands:**
+
+```bash
+shogun cdc start --session <name> [--include <table>...] [--exclude <table>...]
+shogun cdc stop --session <name> --capture <name> [--type <type>]
+shogun cdc capture --session <name> --capture <name> [--type <type>]
+shogun cdc compare --baseline <name> --test <name> \
+  [--ignore-field <field>...] [--no-ignore-lsn]
+```
 
 ---
 
@@ -623,14 +860,45 @@ This is especially useful for testing MCP (Model Context Protocol) and streaming
 
 ---
 
+## Verbose Logging
+
+By default, shogun only shows full request/response details for **failed** tests. Enable verbose mode to see details for every test:
+
+```bash
+shogun run --verbose
+shogun run --verbose --collection agents
+```
+
+Or in config:
+
+```yaml
+reporting:
+  verbose: true
+```
+
+**What verbose does:**
+
+| Behavior | Default | Verbose |
+|----------|---------|---------|
+| Request/response in console | Failures only | All tests |
+| `resolvedRequest`/`resolvedResponse` in `run.json` | Failures only | All tests |
+| Per-test `.log` files in `runs/` | Failures only (unless `save_passing_logs`) | All tests |
+| Script output (pre/post) | Failures only (or `SHOGUN_DEBUG` env) | All tests |
+| Agent diagnostics (response + evaluation) | Failures only | All tests |
+
+Authorization headers are always redacted in output.
+
+---
+
 ## Run Logs
 
 Every run produces a timestamped directory under `runs/`:
 
 ```
 runs/20260328_200532/
-  summary.json                      # Overall results
-  agents--get-all-agents.log        # Per-test detail
+  run.json                          # Full machine-readable results
+  run.txt                           # Human/agent-readable one-liner summary
+  0001_agents--get-all-agents.log   # Per-test detail (failures always; all tests with --verbose)
 ```
 
 ```bash
@@ -638,6 +906,8 @@ shogun report                       # Latest run
 shogun report --run 20260328_200532 # Specific run
 shogun report --format json         # JSON output
 ```
+
+`run.txt` provides a tail-friendly format with one line per test, a failure index with log file paths, and a totals footer — ideal for agents and CI dashboards.
 
 ---
 
@@ -715,6 +985,10 @@ shogun run --output results.json    # Write JSON results to file (Playwright int
 shogun run --params '[{"UserId":42}]'  # Override SQL test params at runtime
 shogun run --backend unix           # Force unix backend
 shogun run --backend powershell     # Force PowerShell backend
+shogun run --verbose                # Log full request/response for every test
+shogun run --restore-snapshot <name> --snapshot-database <db>  # Restore snapshot before tests
+shogun run --no-snapshot            # Skip collection-level snapshot restore
+shogun run --snapshot-provider <name>  # Override default snapshot provider
 ```
 
 **Exit codes:** `0` = all tests passed. `1` = one or more failures (suitable for CI gate).
@@ -826,6 +1100,40 @@ shogun sql --format json             # JSON output (for scripting)
 shogun sql --format markdown         # Markdown table output (for docs/PRs)
 ```
 
+### db
+
+Database snapshot management — create, restore, delete, list, and check existence of database snapshots.
+
+```bash
+shogun db snapshot create --database <db> --name <snapshot>
+                                      Create a database snapshot
+shogun db snapshot restore --database <db> --name <snapshot>
+                                      Restore database from snapshot (--force accepted)
+shogun db snapshot delete --name <snapshot> [--if-exists]
+                                      Delete a snapshot (idempotent with --if-exists)
+shogun db snapshot list [--database <db>] [--format json]
+                                      List snapshots (optionally filtered by database)
+shogun db snapshot exists --database <db> --name <snapshot>
+                                      Check if snapshot exists (exit 0/1)
+shogun db snapshot create --env QA --database MyDB --name baseline
+                                      Use specific env for provider config
+```
+
+### cdc
+
+Change Data Capture — track database changes between two points in time.
+
+```bash
+shogun cdc start --session <name> [--include <table>...] [--exclude <table>...]
+                                      Start CDC monitoring on the database
+shogun cdc stop --session <name> --capture <name> [--type <type>]
+                                      Stop CDC, capture data, disable CDC
+shogun cdc capture --session <name> --capture <name> [--type <type>]
+                                      Capture CDC data without stopping
+shogun cdc compare --baseline <name> --test <name>
+                                      Compare two CDC captures
+```
+
 ### check-backend
 
 Show backend info and verify dependencies.
@@ -891,7 +1199,7 @@ my-api-tests/
 ├── tests/
 │   ├── collections/
 │   │   ├── agents/             # One directory per collection
-│   │   │   ├── _collection.yaml    # Order, setup/teardown hooks
+│   │   │   ├── _collection.yaml    # Order, setup/teardown, vars, snapshots
 │   │   │   ├── get-agents.yaml
 │   │   │   ├── create-agent.yaml
 │   │   │   └── delete-agent.yaml
@@ -899,16 +1207,22 @@ my-api-tests/
 │   │       ├── _collection.yaml
 │   │       └── health.yaml
 │   ├── suites/
-│   │   └── smoke.yaml          # Named multi-collection run
+│   │   └── smoke.yaml          # Named multi-collection run (with vars, validate)
+│   ├── setup-fixtures/         # Reusable shared setup scripts
+│   │   └── workspace-load.yaml
 │   └── fixtures/               # Shared request body JSON files
 │
 ├── expected/                   # Snapshot baselines — committed to git
 │   ├── agents/
 │   └── system/
 │
-└── scripts/                    # Shared TypeScript helpers
-    ├── auth.ts                 # e.g. token refresh helpers
-    └── transforms.ts           # e.g. response normalizers
+├── scripts/                    # Shared TypeScript helpers
+│   ├── auth.ts                 # e.g. token refresh helpers
+│   └── transforms.ts           # e.g. response normalizers
+│
+└── runs/                       # Generated at runtime (gitignored)
+    └── 20260328_200532/
+        ├── run.json            # Full machine-readable results
+        ├── run.txt             # Human/agent-readable one-liner summary
+        └── 0001_*.log          # Per-test detail files
 ```
-
-> `runs/` is generated at runtime and gitignored.
