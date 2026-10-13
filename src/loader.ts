@@ -722,6 +722,7 @@ const SuiteSchema = z.object({
   collections: z.array(z.string()),
   tags: z.array(z.string()).optional(),
   vars: z.record(z.string()).optional(),
+  validate: z.string().optional(),
 });
 
 export function loadSuite(suiteName: string, config: ShogunConfig, cwd: string = process.cwd()): SuiteDefinition {

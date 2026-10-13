@@ -11,3 +11,8 @@ collections:
 # Only run tests carrying ALL of these tags within each collection
 tags:
   - smoke
+
+# Pre-suite validation: a shell command that must exit 0 before tests run.
+# Useful for environment sanity checks — e.g. verify the API is reachable.
+# Uncomment and customise for your environment:
+# validate: "curl -sf ${BASE_URL}/health || exit 1"

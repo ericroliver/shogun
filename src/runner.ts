@@ -11,6 +11,7 @@
 
 import { join, relative, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
@@ -136,6 +137,19 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     // Merge suite-level vars into ctx.vars — lowest precedence layer
     if (suite.vars) {
       Object.assign(vars, suite.vars);
+    }
+
+    // Pre-suite validation — abort if the script exits non-zero
+    if (suite.validate) {
+      const validateResult = runSuiteValidation(suite.validate, env, suite.name);
+      if (!validateResult.ok) {
+        throw new Error(
+          `Pre-suite validation failed for suite "${suite.name}":\n` +
+          `  Command: ${suite.validate}\n` +
+          `  Exit code: ${validateResult.exitCode}\n` +
+          `  stderr: ${validateResult.stderr}`
+        );
+      }
     }
   } else if (opts.collection) {
     collectionNames = Array.isArray(opts.collection) ? opts.collection : [opts.collection];
@@ -306,6 +320,42 @@ interface SharedRunOpts {
   snapshotDatabase?: string;
   /** Snapshot provider override (CLI --snapshot-provider) */
   snapshotProvider?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-suite validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the suite-level validation script (shell command) and returns the
+ * result.  Environment variables from the loaded .env file are injected
+ * into the child process environment.
+ *
+ * @returns ok=true when the script exits 0, ok=false otherwise.
+ */
+function runSuiteValidation(
+  command: string,
+  env: EnvVars,
+  suiteName: string,
+): { ok: boolean; exitCode: number; stderr: string } {
+  console.log(`[shogun] Running pre-suite validation for "${suiteName}"…`);
+  try {
+    execSync(command, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+      timeout: 60_000,
+    });
+    console.log(`[shogun] Pre-suite validation passed.`);
+    return { ok: true, exitCode: 0, stderr: '' };
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() ?? '';
+    const stdout = err.stdout?.toString() ?? '';
+    const exitCode = err.status ?? 1;
+    if (stdout.trim()) {
+      console.error(`[shogun] Validation stdout:\n${stdout}`);
+    }
+    return { ok: false, exitCode, stderr };
+  }
 }
 
 // ---------------------------------------------------------------------------
