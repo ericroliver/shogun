@@ -84,7 +84,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   const scriptsDir = join(cwd, config.paths?.scripts ?? 'scripts');
   const testsDir = join(cwd, config.paths?.tests ?? 'tests');
   const collectionsDir = join(testsDir, 'collections');
-  const logger = new RunLogger(config, cwd);
+  const verbose = opts.verbose ?? config.reporting?.verbose ?? false;
+  const logger = new RunLogger(config, cwd, verbose);
   const startedAt = new Date().toISOString();
 
   // Shared vars across entire run
@@ -338,7 +339,7 @@ interface SharedRunOpts {
  *
  * @returns ok=true when the script exits 0, ok=false otherwise.
  */
-function runSuiteValidation(
+export function runSuiteValidation(
   command: string,
   env: EnvVars,
   suiteName: string,
@@ -1305,8 +1306,8 @@ export async function runAgentTest(
     },
     assertions: { evaluation: evaluationResult },
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    // Diagnostics: include on failure; omit on pass
-    ...(finalStatus === 'failed' ? {
+    // Diagnostics: include on failure (always) or when verbose (all tests)
+    ...(finalStatus === 'failed' || opts.verbose ? {
       agentResponse: response,
       resolvedRequest: request,
       evaluationRequest: evalResult.evaluationRequest,

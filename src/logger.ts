@@ -16,13 +16,15 @@ export class RunLogger {
   private readonly collectionNames: string[] = [];
   private startedAt: string;
   private logSerial = 0;
+  private readonly verbose: boolean;
 
-  constructor(private readonly config: ShogunConfig, private readonly cwd: string = process.cwd()) {
+  constructor(private readonly config: ShogunConfig, private readonly cwd: string = process.cwd(), verbose?: boolean) {
     this.startedAt = new Date().toISOString();
     this.runId = formatRunId(new Date());
     const runsBase = join(cwd, config.paths?.runs ?? 'runs');
     this._runDir = join(runsBase, this.runId);
     mkdirSync(this._runDir, { recursive: true });
+    this.verbose = verbose ?? config.reporting?.verbose ?? false;
   }
 
   get id(): string {
@@ -41,7 +43,7 @@ export class RunLogger {
     // not root causes.  The root-cause failing test already has its own log.
     if (result.status === 'dependency_failed') return;
     // Write logs for passing tests when save_passing_logs or verbose is enabled
-    if (!this.config.reporting?.save_passing_logs && !this.config.reporting?.verbose && result.status === 'passed') {
+    if (!this.config.reporting?.save_passing_logs && !this.verbose && result.status === 'passed') {
       return;
     }
 

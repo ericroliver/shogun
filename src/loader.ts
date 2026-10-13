@@ -71,6 +71,7 @@ export const ShogunConfigSchema = z.object({
     format: z.enum(['pretty', 'json', 'tap']).optional(),
     on_fail: z.enum(['diff', 'body', 'silent']).optional(),
     save_passing_logs: z.boolean().optional(),
+    verbose: z.boolean().optional(),
   }).optional(),
   spec: z.object({
     path: z.string().min(1),

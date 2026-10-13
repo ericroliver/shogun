@@ -239,6 +239,10 @@ export function printTestResult(result: TestResult, verbose = false): void {
             console.log(`    ${c.green}✓${c.reset} Grade: ${gradeStr}  ${c.dim}(${evalResult.evaluatorModel})${c.reset}`);
           }
         }
+        // When verbose, show agent + evaluation request/response diagnostics
+        if (verbose && (result.agentResponse || result.resolvedRequest || result.evaluationRequest)) {
+          printAgentTestResult(result);
+        }
         break;
       case 'failed':
         process.stdout.write(`${c.red}${httpCode}FAIL${c.reset}\n`);
@@ -259,7 +263,7 @@ export function printTestResult(result: TestResult, verbose = false): void {
     const showScriptOutput =
       result.status === 'failed'
         ? result.scriptOutput?.length
-        : process.env.SHOGUN_DEBUG && result.scriptOutput?.length;
+        : (process.env.SHOGUN_DEBUG || verbose) && result.scriptOutput?.length;
     if (showScriptOutput) {
       console.log(`    ${c.dim}── script output ─────────────────────────${c.reset}`);
       for (const msg of result.scriptOutput!) {
