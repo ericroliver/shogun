@@ -311,6 +311,18 @@ export interface SuiteDefinition {
    * Use for suite-level parameters like WORKSPACE_NAME that differ per suite.
    */
   vars?: Record<string, string>;
+  /**
+   * Pre-suite validation script — a shell command that must exit 0 for the
+   * suite to proceed.  Runs after env loading and before any collection
+   * setup.  Useful for environment sanity checks (e.g. verify a service is
+   * reachable, a database is accessible, required tools are installed).
+   *
+   * The command is executed via `sh -c` (or the system shell).  Environment
+   * variables from the loaded .env file are available.  On non-zero exit
+   * the suite aborts immediately with an error message containing the
+   * script's stderr output.
+   */
+  validate?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +692,14 @@ export interface ShogunConfig {
     format?: 'pretty' | 'json' | 'tap';
     on_fail?: 'diff' | 'body' | 'silent';
     save_passing_logs?: boolean;
+    /**
+     * When true, attaches full request/response details to every test result
+     * (not just failures), writes per-test .log files for all tests, and prints
+     * request/response telemetry for passing tests to the console.
+     *
+     * Can also be enabled via the `--verbose` CLI flag.
+     */
+    verbose?: boolean;
   };
   /** OpenAPI spec source configuration */
   spec?: SpecConfig;

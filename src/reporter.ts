@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import type { RunSummary, TestResult, AssertionResults } from './types.js';
+import type { RunSummary, TestResult, AssertionResults, ShogunRequest, ShogunResponse } from './types.js';
 
 // ---------------------------------------------------------------------------
 // ANSI colors (disabled when not a TTY)
@@ -166,7 +166,65 @@ function printAgentTestResult(result: TestResult): void {
   }
 }
 
-export function printTestResult(result: TestResult): void {
+/**
+ * Prints request/response telemetry for a test result.
+ * Used for failed tests (always) and passing tests (when verbose).
+ * Authorization headers are redacted.
+ */
+function printRequestResponse(result: TestResult): void {
+  if (!result.resolvedRequest && !result.resolvedResponse) return;
+
+  console.log(`    ${c.dim}── request ────────────────────────────────────${c.reset}`);
+  if (result.resolvedRequest) {
+    const req: ShogunRequest = result.resolvedRequest;
+    console.log(`    ${c.dim}│ ${c.reset}${c.bold}${req.method}${c.reset} ${req.url}`);
+    // Headers — redact Authorization value
+    const headers = { ...req.headers };
+    if (headers['Authorization']) {
+      headers['Authorization'] = headers['Authorization'].replace(/(Bearer\s+)(.{4}).*/, '$1$2…');
+    }
+    if (Object.keys(headers).length) {
+      for (const [k, v] of Object.entries(headers)) {
+        console.log(`    ${c.dim}│   ${k}: ${v}${c.reset}`);
+      }
+    }
+    if (req.params && Object.keys(req.params).length) {
+      console.log(`    ${c.dim}│   query: ${JSON.stringify(req.params)}${c.reset}`);
+    }
+    if (req.body !== undefined) {
+      const bodyStr = typeof req.body === 'string'
+        ? req.body
+        : JSON.stringify(req.body, null, 2);
+      const snippet = bodyStr.length > 800 ? bodyStr.slice(0, 800) + '…' : bodyStr;
+      console.log(`    ${c.dim}│   body: ${snippet}${c.reset}`);
+    }
+  }
+
+  if (result.resolvedResponse) {
+    const res: ShogunResponse = result.resolvedResponse;
+    const statusColor = res.status >= 400 ? c.red : res.status >= 300 ? c.yellow : c.green;
+    console.log(`    ${c.dim}── response ───────────────────────────────────${c.reset}`);
+    console.log(`    ${c.dim}│ ${c.reset}${statusColor}${c.bold}${res.status}${c.reset}  ${c.dim}${res.curlMs}ms${c.reset}`);
+    // Response headers
+    if (Object.keys(res.headers).length) {
+      for (const [k, v] of Object.entries(res.headers)) {
+        console.log(`    ${c.dim}│   ${k}: ${v}${c.reset}`);
+      }
+    }
+    // Response body
+    const rawBody = typeof res.raw === 'string' ? res.raw : JSON.stringify(res.body);
+    const bodySnippet = rawBody.length > 1200 ? rawBody.slice(0, 1200) + '…' : rawBody;
+    if (bodySnippet.trim()) {
+      console.log(`    ${c.dim}│   body:${c.reset}`);
+      for (const line of bodySnippet.split('\n')) {
+        console.log(`    ${c.dim}│     ${line}${c.reset}`);
+      }
+    }
+  }
+  console.log(`    ${c.dim}──────────────────────────────────────────────${c.reset}`);
+}
+
+export function printTestResult(result: TestResult, verbose = false): void {
   // Agent tests have their own display format
   if (result.assertions.evaluation) {
     const httpCode = result.httpStatus != null ? `${result.httpStatus} ` : '';
@@ -180,6 +238,10 @@ export function printTestResult(result: TestResult): void {
             const gradeStr = evalResult.grade !== undefined ? `${evalResult.grade}/100` : 'N/A';
             console.log(`    ${c.green}✓${c.reset} Grade: ${gradeStr}  ${c.dim}(${evalResult.evaluatorModel})${c.reset}`);
           }
+        }
+        // When verbose, show agent + evaluation request/response diagnostics
+        if (verbose && (result.agentResponse || result.resolvedRequest || result.evaluationRequest)) {
+          printAgentTestResult(result);
         }
         break;
       case 'failed':
@@ -201,7 +263,7 @@ export function printTestResult(result: TestResult): void {
     const showScriptOutput =
       result.status === 'failed'
         ? result.scriptOutput?.length
-        : process.env.SHOGUN_DEBUG && result.scriptOutput?.length;
+        : (process.env.SHOGUN_DEBUG || verbose) && result.scriptOutput?.length;
     if (showScriptOutput) {
       console.log(`    ${c.dim}── script output ─────────────────────────${c.reset}`);
       for (const msg of result.scriptOutput!) {
@@ -216,6 +278,9 @@ export function printTestResult(result: TestResult): void {
   switch (result.status) {
     case 'passed':
       process.stdout.write(`${c.green}${httpCode}OK${c.reset} ${c.dim}${result.durationMs}ms${c.reset}${formatTimings(result)}\n`);
+      if (verbose) {
+        printRequestResponse(result);
+      }
       break;
     case 'failed': {
       process.stdout.write(`${c.red}${httpCode}FAIL${c.reset}\n`);
@@ -239,57 +304,8 @@ export function printTestResult(result: TestResult): void {
         console.log(`    ${c.red}Error: ${result.error}${c.reset}`);
       }
 
-      // ── Request / Response telemetry ────────────────────────────────────
-      if (result.resolvedRequest || result.resolvedResponse) {
-        console.log(`    ${c.dim}── request ────────────────────────────────────${c.reset}`);
-        if (result.resolvedRequest) {
-          const req = result.resolvedRequest;
-          console.log(`    ${c.dim}│ ${c.reset}${c.bold}${req.method}${c.reset} ${req.url}`);
-          // Headers — redact Authorization value
-          const headers = { ...req.headers };
-          if (headers['Authorization']) {
-            headers['Authorization'] = headers['Authorization'].replace(/(Bearer\s+)(.{4}).*/, '$1$2…');
-          }
-          if (Object.keys(headers).length) {
-            for (const [k, v] of Object.entries(headers)) {
-              console.log(`    ${c.dim}│   ${k}: ${v}${c.reset}`);
-            }
-          }
-          if (req.params && Object.keys(req.params).length) {
-            console.log(`    ${c.dim}│   query: ${JSON.stringify(req.params)}${c.reset}`);
-          }
-          if (req.body !== undefined) {
-            const bodyStr = typeof req.body === 'string'
-              ? req.body
-              : JSON.stringify(req.body, null, 2);
-            const snippet = bodyStr.length > 800 ? bodyStr.slice(0, 800) + '…' : bodyStr;
-            console.log(`    ${c.dim}│   body: ${snippet}${c.reset}`);
-          }
-        }
-
-        if (result.resolvedResponse) {
-          const res = result.resolvedResponse;
-          const statusColor = res.status >= 400 ? c.red : res.status >= 300 ? c.yellow : c.green;
-          console.log(`    ${c.dim}── response ───────────────────────────────────${c.reset}`);
-          console.log(`    ${c.dim}│ ${c.reset}${statusColor}${c.bold}${res.status}${c.reset}  ${c.dim}${res.curlMs}ms${c.reset}`);
-          // Response headers
-          if (Object.keys(res.headers).length) {
-            for (const [k, v] of Object.entries(res.headers)) {
-              console.log(`    ${c.dim}│   ${k}: ${v}${c.reset}`);
-            }
-          }
-          // Response body
-          const rawBody = typeof res.raw === 'string' ? res.raw : JSON.stringify(res.body);
-          const bodySnippet = rawBody.length > 1200 ? rawBody.slice(0, 1200) + '…' : rawBody;
-          if (bodySnippet.trim()) {
-            console.log(`    ${c.dim}│   body:${c.reset}`);
-            for (const line of bodySnippet.split('\n')) {
-              console.log(`    ${c.dim}│     ${line}${c.reset}`);
-            }
-          }
-        }
-        console.log(`    ${c.dim}──────────────────────────────────────────────${c.reset}`);
-      }
+      // Request / Response telemetry
+      printRequestResponse(result);
       break;
     }
     case 'needs_baseline':
@@ -305,11 +321,11 @@ export function printTestResult(result: TestResult): void {
       break;
   }
 
-  // Always show script output for failed tests; gate on SHOGUN_DEBUG for passing
+  // Always show script output for failed tests; gate on SHOGUN_DEBUG or verbose for passing
   const showScriptOutput =
     result.status === 'failed'
       ? result.scriptOutput?.length
-      : process.env.SHOGUN_DEBUG && result.scriptOutput?.length;
+      : (process.env.SHOGUN_DEBUG || verbose) && result.scriptOutput?.length;
 
   if (showScriptOutput) {
     console.log(`    ${c.dim}── script output ─────────────────────────${c.reset}`);

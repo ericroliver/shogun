@@ -11,6 +11,7 @@
 
 import { join, relative, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import {
   loadConfig, loadEnv, loadTestFile, loadCollection, discoverCollections,
   loadSuite, loadSetupFixture, buildDependencyOrder, resolveTestRef,
@@ -60,6 +61,8 @@ export interface RunOptions {
   snapshotDatabase?: string;
   /** Snapshot provider override (CLI --snapshot-provider) */
   snapshotProvider?: string;
+  /** Verbose mode: log full request/response for every test (CLI --verbose) */
+  verbose?: boolean;
 }
 
 export async function runTests(opts: RunOptions): Promise<RunSummary> {
@@ -81,7 +84,8 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
   const scriptsDir = join(cwd, config.paths?.scripts ?? 'scripts');
   const testsDir = join(cwd, config.paths?.tests ?? 'tests');
   const collectionsDir = join(testsDir, 'collections');
-  const logger = new RunLogger(config, cwd);
+  const verbose = opts.verbose ?? config.reporting?.verbose ?? false;
+  const logger = new RunLogger(config, cwd, verbose);
   const startedAt = new Date().toISOString();
 
   // Shared vars across entire run
@@ -104,6 +108,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     noSnapshot: opts.noSnapshot,
     snapshotDatabase: opts.snapshotDatabase,
     snapshotProvider: opts.snapshotProvider,
+    verbose: opts.verbose ?? config.reporting?.verbose ?? false,
   };
 
   // -------------------------------------------------------------------------
@@ -136,6 +141,19 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     // Merge suite-level vars into ctx.vars — lowest precedence layer
     if (suite.vars) {
       Object.assign(vars, suite.vars);
+    }
+
+    // Pre-suite validation — abort if the script exits non-zero
+    if (suite.validate) {
+      const validateResult = runSuiteValidation(suite.validate, env, suite.name);
+      if (!validateResult.ok) {
+        throw new Error(
+          `Pre-suite validation failed for suite "${suite.name}":\n` +
+          `  Command: ${suite.validate}\n` +
+          `  Exit code: ${validateResult.exitCode}\n` +
+          `  stderr: ${validateResult.stderr}`
+        );
+      }
     }
   } else if (opts.collection) {
     collectionNames = Array.isArray(opts.collection) ? opts.collection : [opts.collection];
@@ -255,7 +273,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
       }
 
       logger.recordTest(result, collectionName);
-      printTestResult(result);
+      printTestResult(result, sharedOpts.verbose);
       if (result.sqlExecSummary) {
         printSqlTestDetails(result);
       }
@@ -306,6 +324,44 @@ interface SharedRunOpts {
   snapshotDatabase?: string;
   /** Snapshot provider override (CLI --snapshot-provider) */
   snapshotProvider?: string;
+  /** Verbose: log full request/response for every test */
+  verbose?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-suite validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the suite-level validation script (shell command) and returns the
+ * result.  Environment variables from the loaded .env file are injected
+ * into the child process environment.
+ *
+ * @returns ok=true when the script exits 0, ok=false otherwise.
+ */
+export function runSuiteValidation(
+  command: string,
+  env: EnvVars,
+  suiteName: string,
+): { ok: boolean; exitCode: number; stderr: string } {
+  console.log(`[shogun] Running pre-suite validation for "${suiteName}"…`);
+  try {
+    execSync(command, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+      timeout: 60_000,
+    });
+    console.log(`[shogun] Pre-suite validation passed.`);
+    return { ok: true, exitCode: 0, stderr: '' };
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() ?? '';
+    const stdout = err.stdout?.toString() ?? '';
+    const exitCode = err.status ?? 1;
+    if (stdout.trim()) {
+      console.error(`[shogun] Validation stdout:\n${stdout}`);
+    }
+    return { ok: false, exitCode, stderr };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +642,7 @@ async function resolveDependencies(
     });
 
     opts.logger.recordTest(depResult, depCollection);
-    printTestResult(depResult);
+    printTestResult(depResult, opts.verbose);
     if (depResult.sqlExecSummary) {
       printSqlTestDetails(depResult);
     }
@@ -799,8 +855,10 @@ async function runHttpTest(
     timings,
     assertions,
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    // Attach full request + response on failures so the reporter can dump diagnostics
-    ...(finalStatus === 'failed' ? { resolvedRequest: request, resolvedResponse: response } : {}),
+    // Attach full request + response on failures (always) or when verbose (all tests)
+    ...(finalStatus === 'failed' || opts.verbose
+      ? { resolvedRequest: request, resolvedResponse: response }
+      : {}),
   };
 }
 
@@ -1248,8 +1306,8 @@ export async function runAgentTest(
     },
     assertions: { evaluation: evaluationResult },
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    // Diagnostics: include on failure; omit on pass
-    ...(finalStatus === 'failed' ? {
+    // Diagnostics: include on failure (always) or when verbose (all tests)
+    ...(finalStatus === 'failed' || opts.verbose ? {
       agentResponse: response,
       resolvedRequest: request,
       evaluationRequest: evalResult.evaluationRequest,

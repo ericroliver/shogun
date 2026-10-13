@@ -61,6 +61,7 @@ Usage:
   shogun run --params '[{"UserId":42}]'  Override SQL test params at runtime
   shogun run --backend unix           Force unix backend (curl + jq)
   shogun run --backend powershell     Force PowerShell backend
+  shogun run --verbose                Log full request/response for every test
 
   shogun snapshot                     Capture/update all baselines
   shogun snapshot --suite api-testapp-1  Snapshot with suite vars (workspace etc.)
@@ -214,6 +215,8 @@ interface ParsedArgs {
   ifExists?: boolean;
   // cdc subcommand flags
   session?: string;
+  // verbose: log full request/response for every test
+  verbose?: boolean;
   capture?: string;
   captureType?: string;
   tablesToInclude?: string[];
@@ -310,6 +313,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--snapshot-database': result.snapshotDatabase = argv[++i]; break;
       case '--snapshot-provider': result.snapshotProvider = argv[++i]; break;
       case '--no-snapshot':      result.noSnapshot = true; break;
+      case '--verbose':          result.verbose = true; break;
       case '--database': result.database = argv[++i]; break;
       case '--name':    result.snapshotName = argv[++i]; break;
       case '--if-exists': result.ifExists = true; break;
@@ -447,6 +451,7 @@ async function main() {
         noSnapshot: args.noSnapshot,
         snapshotDatabase: args.snapshotDatabase,
         snapshotProvider: args.snapshotProvider,
+        verbose: args.verbose,
       });
       process.exit(exitCode);
       break;

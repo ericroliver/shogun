@@ -1,6 +1,6 @@
 {
   "name": "shogun",
-  "version": "0.5.14-beta",
+  "version": "0.5.17-beta",
   "description": "Shell-first, TypeScript-enhanced API testing system",
   "type": "module",
   "bin": {
@@ -23,7 +23,7 @@
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build",
     "lint:yaml": "tsx src/index.ts lint",
-    "test:unit": "tsx --test src/tests/suite-collection-vars.test.ts src/tests/coverage-matcher.test.ts",
+    "test:unit": "tsx --test src/tests/suite-collection-vars.test.ts src/tests/coverage-matcher.test.ts src/tests/runner-pure.test.ts src/tests/suite-validation.test.ts src/tests/loader-pure.test.ts src/tests/logger-pure.test.ts",
     "test:smoke": "tsx src/index.ts run --suite smoke",
     "test:tsap": "tsx src/index.ts run --suite tsap",
     "test:failures": "tsx src/index.ts run --collection _failures_",

@@ -71,6 +71,7 @@ export const ShogunConfigSchema = z.object({
     format: z.enum(['pretty', 'json', 'tap']).optional(),
     on_fail: z.enum(['diff', 'body', 'silent']).optional(),
     save_passing_logs: z.boolean().optional(),
+    verbose: z.boolean().optional(),
   }).optional(),
   spec: z.object({
     path: z.string().min(1),
@@ -722,6 +723,7 @@ const SuiteSchema = z.object({
   collections: z.array(z.string()),
   tags: z.array(z.string()).optional(),
   vars: z.record(z.string()).optional(),
+  validate: z.string().optional(),
 });
 
 export function loadSuite(suiteName: string, config: ShogunConfig, cwd: string = process.cwd()): SuiteDefinition {
