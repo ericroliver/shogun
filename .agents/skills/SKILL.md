@@ -1,8 +1,7 @@
 ---
 name: shogun-test-writer
-description: Writing, debugging, and maintaining shogun tests for testing API. Shogun replaces the needs for tools like Postman or Hoppscotch and goes bare metal on API testing.
+description: Writing, debugging, and maintaining shogun tests for API testing. Shogun replaces tools like Postman or Hoppscotch and goes bare metal on API testing.
 ---
-
 
 ## Protocol: When Given a Test Run With Failures
 
@@ -12,16 +11,16 @@ description: Writing, debugging, and maintaining shogun tests for testing API. S
 
    | Group | Count | Root Cause |
    |-------|-------|-----------|
-   | URL encoding | 7 | `encodeURIComponent(filePath)` encodes `/` → `%2F` → 404 on file-path endpoints |
-   | Scope collision | 1 | Duplicate `const ws` in `delete-note` pre-script — compile error |
+   | URL encoding | 7 | `encodeURIComponent(path)` encodes `/` → `%2F` → 404 |
+   | Variable collision | 1 | Duplicate `const` in pre-script — compile error |
    | Wrong shape | 2 | `type == "array"` asserted on wrapped-object responses |
-   | Missing header | 1 | `ctx.http.get()` missing workspace header in pre-script |
-   | Cascade | 1 | Secondary failure — caused by wrong shape in prior test |
+   | Missing header | 1 | `ctx.http.get()` missing required header in pre-script |
+   | Cascade | 1 | Secondary failure — caused by prior test's broken post-script |
 
 2. **For each ambiguous group** (unexpected status code, wrong shape, missing field) — **verify the API contract** before concluding it's a test bug or API bug:
 
    ```bash
-   # Confirm what the spec actually says this endpoint should do
+   # Confirm what the spec says this endpoint should do
    shogun spec --endpoint /api/the/failing/path --method POST
    shogun spec --schema TheRequestBodySchemaName
    ```
@@ -44,13 +43,12 @@ description: Writing, debugging, and maintaining shogun tests for testing API. S
 
 ## Mandatory Pre-Flight (Every Session)
 
-Before touching any test file, complete this checklist. Do not skip steps.
+Before touching any test file, complete this checklist:
 
-1. **Read [`agents.md`](../../agents.md)** — AGENTS.md rules, especially the two-suite invariant
-2. **Read [`docs/testing-journal.md`](../testing-journal.md)** — all 15 sections
-3. **Read the testing plan** for the collection you're touching: `local-dev-test-repo/testing-plans/{collection}.md`
-4. **Read `_collection.yaml`** for the collection — understand setup/teardown/var init
-5. **Read the suite file** being run (e.g., `tests/suites/api-testapp-1.yaml`) — understand which `vars:` are injected
+1. **Read the project's `AGENTS.md`** (if present) — project-specific rules and conventions
+2. **Read `_collection.yaml`** for the collection — understand setup/teardown/var init
+3. **Read the suite file** being run (e.g., `tests/suites/smoke.yaml`) — understand which `vars:` are injected and whether `validate:` is set
+4. **Check the config** — `shogun.config.yaml` for connections, snapshots, and reporting settings
 
 ---
 
@@ -59,7 +57,7 @@ Before touching any test file, complete this checklist. Do not skip steps.
 Inline YAML script blocks (`pre: |`, `post: |`, `setup: |`, `teardown: |`) are compiled as a **single TypeScript lexical scope**. A `const ws` at line 2 and another `const ws` at line 31 is a compile error.
 
 **Before adding any code to an existing inline script:**
-1. Read the ENTIRE existing block top-to-bottom with `read_file`
+1. Read the ENTIRE existing block top-to-bottom
 2. List every `const`/`let`/`var` name already declared
 3. Only then write new code
 
@@ -67,76 +65,47 @@ Inline YAML script blocks (`pre: |`, `post: |`, `setup: |`, `teardown: |`) are c
 
 ---
 
-## Rule 2 — File Path Params: Use `encodeFilePath()`, Not `encodeURIComponent`
+## Rule 2 — Path Params: Encode Per-Segment, Not the Whole Path
 
-The Enigma API uses **real forward slashes** as path separators in file-based resource identifiers.
+If your API uses path parameters that contain `/` (e.g., file paths), `encodeURIComponent(path)` will encode `/` to `%2F` and break routing.
 
 - `encodeURIComponent(filePath)` converts `/` to `%2F` → **breaks routing (404)**
 - Bare `${filePath}` skips encoding of spaces, `#`, `?`, `&` etc. → **also wrong**
 
-The correct fix is **per-segment encoding** via the shared `url` script helper:
+The correct approach is **per-segment encoding** — encode each path segment individually while preserving the `/` separators. Create a shared helper in your `scripts/` directory:
 
 ```javascript
-// ✅ CORRECT — use the shared library function
+// ✅ CORRECT — per-segment encoding
 const { encodeFilePath } = ctx.scripts.url;
-ctx.request.path = `/api/code/structure/${encodeFilePath(filePath)}`;
+ctx.request.path = `/api/files/${encodeFilePath(filePath)}`;
 
 // ❌ WRONG — %2F breaks the route, returns 404
-ctx.request.path = `/api/code/structure/${encodeURIComponent(filePath)}`;
+ctx.request.path = `/api/files/${encodeURIComponent(filePath)}`;
 
 // ❌ ALSO WRONG — spaces/# etc. not encoded
-ctx.request.path = `/api/code/structure/${filePath}`;
+ctx.request.path = `/api/files/${filePath}`;
 ```
 
-**`encodeFilePath` is only needed for the `filePath`/`dirPath` segment.** Identifiers that never contain `/` (like `className`, `methodName`, `propertyName`) still use bare `encodeURIComponent`. Query-string values always use `encodeURIComponent`.
-
-```javascript
-// Mixed example — class + file path endpoint
-ctx.request.path = `/api/code/class/${encodeURIComponent(className)}/${encodeFilePath(filePath)}`;
-```
-
-**See also:** [`local-dev-test-repo/docs/scripts-library.md`](../../local-dev-test-repo/docs/scripts-library.md) — full library reference including `encodeFilePath` and `auth` helpers.
-
-**`shogun lint` will catch** bare `encodeURIComponent(` on a `ctx.request.path` line and flag it as an error.
-
-This applies to all endpoints with `{filePath}` or `{dirPath}` in the URL:
-- `/api/code/structure/{filePath}`
-- `/api/code/raw/{filePath}`
-- `/api/code/node/{filePath}`
-- `/api/code/class/{className}/{filePath}`
-- `/api/code/comments/{className}/{filePath}`
-- `/api/code/method/{className}/{methodName}/{filePath}`
-- `/api/code/property/{className}/{propertyName}/{filePath}`
-- `/api/code/clones/find/{filePath}`
-- `/api/fs/exists/{filePath}`
-- `/api/fs/file/{filePath}`
-- `/api/fs/list/{dirPath}`
-- `/api/fs/verify/{filePath}`
+For simple identifiers (IDs, slugs) that never contain `/`, use `encodeURIComponent` directly.
 
 ---
 
 ## Rule 3 — `ctx.http.*` Calls Must Carry Their Own Headers
 
-`ctx.request.headers['X-Enigma-Workspace'] = ws` only affects the **curl request**. It does NOT propagate to `ctx.http.*` calls. These are two completely separate HTTP mechanisms.
+`ctx.request.headers['Authorization'] = token` only affects the **curl request for this test**. It does NOT propagate to `ctx.http.*` calls. These are two completely separate HTTP mechanisms.
 
-Every `ctx.http.get/post/put/patch/delete` call that hits a workspace-aware endpoint must explicitly pass the header:
+Every `ctx.http.get/post/put/patch/delete` call that needs auth or workspace headers must explicitly pass them:
 
 ```javascript
-// ✅ CORRECT — header wired explicitly
-const ws = (ctx.vars.workspaceName as string) ?? '';
-const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
-const res = await ctx.http.get(`/api/fs/exists/${filePath}`, { headers: wsHeaders });
+// ✅ CORRECT — headers wired explicitly
+const token = ctx.env.AUTH_TOKEN ?? '';
+const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+const res = await ctx.http.get('/api/something', { headers: authHeaders });
 
 // ❌ WRONG — ctx.request.headers does not carry over to ctx.http calls
-ctx.request.headers['X-Enigma-Workspace'] = ws;
-const res = await ctx.http.get(`/api/fs/exists/${filePath}`); // no workspace header
+ctx.request.headers['Authorization'] = `Bearer ${token}`;
+const res = await ctx.http.get('/api/something'); // no auth header
 ```
-
-**Consequence of omission:** When multiple workspaces are loaded on the server, the API returns:
-```json
-{"error": "Multiple workspaces are loaded. Specify one via the 'X-Enigma-Workspace' header"}
-```
-This returns 400, which causes `ctx.assert(res.status === 200, ...)` to fail.
 
 ---
 
@@ -146,21 +115,20 @@ Never write `shape:` assertions from docs, guesses, or mental models. Always ver
 
 **Before writing any shape assertion:**
 ```bash
-# Substitute BASE_URL and WORKSPACE from local.env
-BASE_URL=$(grep BASE_URL local-dev-test-repo/envs/local.env | cut -d= -f2)
-WORKSPACE=api-testapp-1
+# Run the test once and look at the actual response
+shogun run --file tests/collections/agents/get-agents.yaml --verbose
 
-curl -s "${BASE_URL}/api/deps/hotspots?top=10" \
-  -H "X-Enigma-Workspace: ${WORKSPACE}" | jq 'keys'
+# Or curl the endpoint directly
+curl -s "${BASE_URL}/api/agents" -H "Authorization: Bearer ${AUTH_TOKEN}" | jq 'keys'
 ```
 
-**If the response is `{"files": [...], "_sensors": [...]}` — the shape is NOT `type == "array"`.**
+**If the response is `{"agents": [...], "total": 5}` — the shape is NOT `type == "array"`.**
 
 Write the assertion against the actual wrapper structure:
 ```yaml
 shape:
-  - 'has("files")'
-  - '.files | type == "array"'
+  - 'has("agents")'
+  - '.agents | type == "array"'
 ```
 
 And fix the post-script to match:
@@ -169,7 +137,7 @@ And fix the post-script to match:
 const items = Array.isArray(body) ? body : [];
 
 // Correct — unwrap the envelope
-const items = Array.isArray(body) ? body : (body.files ?? body.links ?? body.items ?? []);
+const items = Array.isArray(body) ? body : (body.agents ?? body.items ?? []);
 ```
 
 ---
@@ -185,15 +153,15 @@ const items = Array.isArray(body) ? body : (body.files ?? body.links ?? body.ite
 
 **Snapshot staleness** (response content changed) is a separate issue from shape assertion failures. Both require different fixes:
 - Shape fail → fix the assertion
-- Stale snapshot (only `_sensors.changedAt` changed) → add `ignore_fields` for `_sensors` fields
+- Stale snapshot (only volatile fields changed) → add `ignore_fields` for those fields
 
-**Standard `_sensors` ignore fields** for any snapshot-enabled test against this API:
+**Common volatile fields to ignore:**
 ```yaml
 ignore_fields:
-  - '**._sensorsEpoch'
-  - '**._sensors[*].changedAt'
-  - '**._sensors[*].recentOutput'
-  - '**._sensors[*].epoch'
+  - "**.id"
+  - "**.timestamp"
+  - "**.createdAt"
+  - "**.updatedAt"
 ```
 
 ---
@@ -216,11 +184,11 @@ The purpose of tests is to find bugs, not to be green.
 
 **When a non-2xx is legitimately correct:**
 ```javascript
-// ✅ Confirmed — DELETE /api/graph/links returns 405 (no delete endpoint)
-ctx.assert(s === 405, `Expected 405 (confirmed API limitation — no DELETE endpoint for links), got ${s}`);
+// ✅ Confirmed — DELETE returns 405 (no delete endpoint)
+ctx.assert(s === 405, `Expected 405 (confirmed API limitation — no DELETE endpoint), got ${s}`);
 
 // ✅ Confirmed — verify-after-delete returns 404
-ctx.assert(s === 404, `Expected 404 confirming node is gone, got ${s}`);
+ctx.assert(s === 404, `Expected 404 confirming resource is gone, got ${s}`);
 ```
 The assertion message must explain WHY that code is expected.
 
@@ -239,47 +207,46 @@ When a test fails with "X is not set — prior test must have run first", the ro
 
 ---
 
-## Rule 8 — `deps` Collection: Response Shapes Are Wrapped Objects
+## Rule 8 — Use `--verbose` for Debugging
 
-The `/api/deps/*` endpoints return wrapped objects, not bare arrays. Do not assert `type == "array"`.
+When a test fails and the error output isn't enough to diagnose, use `--verbose` to see full request/response details for every test:
 
-| Endpoint | Actual wrapper | Array field |
-|----------|---------------|-------------|
-| `GET /api/deps/hotspots` | `{"files": [...], "_sensors": [...]}` | `files` |
-| `GET /api/deps/links` | `{"count": N, "links": [...], "_sensors": [...]}` | `links` |
-| `GET /api/deps/files/{path}` | `{"dependencies": [...], ...}` | `dependencies` |
-| `GET /api/deps/impact/{path}` | `{"impacted": [...], ...}` | `impacted` |
-| `GET /api/deps/methods/{path}` | object | various |
-| `GET /api/deps/order` | `{"order": [...], ...}` | `order` |
+```bash
+# Full request/response telemetry for all tests (not just failures)
+shogun run --verbose
 
-**Standard post-script pattern for unwrapping:**
-```javascript
-const body = ctx.response.body as any;
-const items = Array.isArray(body)
-  ? body
-  : (body.files ?? body.links ?? body.dependencies ?? body.impacted ?? body.order ?? []);
-ctx.log(`Items returned: ${items.length}`);
+# Verbose for a single file
+shogun run --file tests/collections/agents/get-agents.yaml --verbose
+
+# Verbose for a suite
+shogun run --suite smoke --verbose
 ```
+
+Verbose mode attaches `resolvedRequest` and `resolvedResponse` to every test result, writes per-test `.log` files for passing tests, and prints request/response telemetry in the console — including headers (with auth redacted) and response bodies.
+
+You can also set `SHOGUN_DEBUG=1` as an environment variable for debug-level stderr output from the runner internals.
 
 ---
 
-## Rule 9 — The `workspaceName` Var Flows Through the `workspace-load` Fixture
+## Rule 9 — Suite Vars and the Fixture Chain
 
-`ctx.vars.workspaceName` is set by the `workspace-load` setup fixture. It is not set by each collection's own setup in the `code` collection — the collection delegates to the fixture.
+Suite-level vars are seeded into `ctx.vars` before any collection setup runs. Collection vars override suite vars on collision. Both are overridden by runtime script assignments.
 
 **Flow:**
 ```
-suite vars: { WORKSPACE_NAME: "api-testapp-1" }
+suite vars: { WORKSPACE_NAME: "my-workspace" }
+  → ctx.vars.WORKSPACE_NAME = "my-workspace"
   → setup_fixtures: [workspace-load]
-    → workspace-load.yaml reads ctx.vars.WORKSPACE_NAME
-    → sets ctx.vars.workspaceName = "api-testapp-1"
+    → fixture reads ctx.vars.WORKSPACE_NAME
+    → sets ctx.vars.workspaceName = "my-workspace"
   → collection setup: reads ctx.vars.workspaceName (already set)
   → test pre-scripts: read ctx.vars.workspaceName
 ```
 
-If `ctx.vars.workspaceName` is null in a pre-script, the workspace-load fixture either didn't run or WORKSPACE_NAME wasn't in the suite vars. Check the suite file first.
-
-The `deps` collection does NOT use `setup_fixtures: [workspace-load]` — it does its own workspace load in `setup:`. This means `_fixtureLoaded_workspace` does NOT get set by deps collection setup, and if another collection using the fixture runs later in the same session, it will re-load the workspace.
+If a var is null in a pre-script, check:
+1. The suite file — is the var declared in `vars:`?
+2. The fixture — did it run and set the expected var?
+3. The collection `_collection.yaml` — does it declare its own `vars:` that override the suite?
 
 ---
 
@@ -296,37 +263,41 @@ This creates a verifiable prediction. If the test output contradicts your predic
 
 ## Quick Reference: Standard Pre-Script Patterns
 
-### GET test with file-path param (no encoding)
+### Basic GET test with auth
 ```javascript
-const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
-
-const filePath = (ctx.vars.filePath as string) || ctx.env.FILE_PATH || '';
-ctx.assert(!!filePath, 'FILE_PATH is not set — required for this test');
-ctx.request.path = `/api/code/structure/${filePath}`;
+const token = ctx.env.AUTH_TOKEN ?? '';
+if (token) ctx.request.headers['Authorization'] = `Bearer ${token}`;
 ```
 
 ### Pre-script with a `ctx.http` verification call
 ```javascript
-const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
-const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
+const token = ctx.env.AUTH_TOKEN ?? '';
+const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 
-// ← Every ctx.http call needs its own wsHeaders
-const checkRes = await ctx.http.get(`/api/fs/exists/${filePath}`, { headers: wsHeaders });
-ctx.assert(checkRes.status === 200, `File not found: ${checkRes.status}`);
+// Every ctx.http call needs its own authHeaders
+const checkRes = await ctx.http.get('/api/resource/check', { headers: authHeaders });
+ctx.assert(checkRes.status === 200, `Resource not found: ${checkRes.status}`);
 ```
 
 ### Inline script with multiple HTTP sub-calls — avoid name collisions
 ```javascript
-// Declare ws ONCE at the top of the script
-const ws = (ctx.vars.workspaceName as string) ?? '';
-if (ws) ctx.request.headers['X-Enigma-Workspace'] = ws;
-const wsHeaders = ws ? { 'X-Enigma-Workspace': ws } : {};
+// Declare variables ONCE at the top of the script
+const token = ctx.env.AUTH_TOKEN ?? '';
+const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 
-// Reuse wsHeaders and ws for all sub-calls — do NOT re-declare
-const r1 = await ctx.http.get('/api/something', { headers: wsHeaders });
-const r2 = await ctx.http.post('/api/other', body, { headers: wsHeaders });
+// Reuse authHeaders for all sub-calls — do NOT re-declare
+const r1 = await ctx.http.get('/api/something', { headers: authHeaders });
+const r2 = await ctx.http.post('/api/other', body, { headers: authHeaders });
+```
+
+### Unwrapping envelope responses
+```javascript
+const body = ctx.response.body as any;
+// APIs often wrap arrays in objects — unwrap the envelope
+const items = Array.isArray(body)
+  ? body
+  : (body.items ?? body.data ?? body.results ?? body.agents ?? []);
+ctx.log(`Items returned: ${items.length}`);
 ```
 
 ---
@@ -335,10 +306,11 @@ const r2 = await ctx.http.post('/api/other', body, { headers: wsHeaders });
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| `encodeURIComponent(filePath)` where filePath has `/` | 404 — `%2F` breaks routing | Use raw filePath |
+| `encodeURIComponent(filePath)` where filePath has `/` | 404 — `%2F` breaks routing | Use per-segment encoding |
 | `const ws = ...` twice in same script | TransformError compile fail | Read whole script before adding decls |
-| `ctx.http.get(url)` with no headers | 400 — missing workspace header | Always pass `{ headers: wsHeaders }` |
+| `ctx.http.get(url)` with no auth header | 401 — missing credentials | Always pass `{ headers: authHeaders }` |
 | `shape: type == "array"` on wrapped endpoint | Shape fail always | Curl endpoint, write from real response |
 | `ctx.assert(s === 200 \|\| s === 404)` on a create | Passes even when API broken | One success code only |
 | `if (s === 404) { return; }` | Test always passes | Remove; assert the correct code |
 | Snapshot after shape fail | `NEEDS BASELINE` forever | Fix assertions first, snapshot after |
+| Not using `--verbose` when debugging | Missing request/response context | Run with `--verbose` to see full details |
