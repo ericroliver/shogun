@@ -18,6 +18,7 @@ export interface RunArgs {
   noSnapshot?: boolean;
   snapshotDatabase?: string;
   snapshotProvider?: string;
+  verbose?: boolean;
 }
 
 export async function run(args: RunArgs): Promise<number> {
@@ -34,6 +35,7 @@ export async function run(args: RunArgs): Promise<number> {
       noSnapshot: args.noSnapshot,
       snapshotDatabase: args.snapshotDatabase,
       snapshotProvider: args.snapshotProvider,
+      verbose: args.verbose,
     });
 
     // Write JSON output to file (for Playwright and other integrations)

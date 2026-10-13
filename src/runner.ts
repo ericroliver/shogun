@@ -61,6 +61,8 @@ export interface RunOptions {
   snapshotDatabase?: string;
   /** Snapshot provider override (CLI --snapshot-provider) */
   snapshotProvider?: string;
+  /** Verbose mode: log full request/response for every test (CLI --verbose) */
+  verbose?: boolean;
 }
 
 export async function runTests(opts: RunOptions): Promise<RunSummary> {
@@ -105,6 +107,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     noSnapshot: opts.noSnapshot,
     snapshotDatabase: opts.snapshotDatabase,
     snapshotProvider: opts.snapshotProvider,
+    verbose: opts.verbose ?? config.reporting?.verbose ?? false,
   };
 
   // -------------------------------------------------------------------------
@@ -269,7 +272,7 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
       }
 
       logger.recordTest(result, collectionName);
-      printTestResult(result);
+      printTestResult(result, sharedOpts.verbose);
       if (result.sqlExecSummary) {
         printSqlTestDetails(result);
       }
@@ -320,6 +323,8 @@ interface SharedRunOpts {
   snapshotDatabase?: string;
   /** Snapshot provider override (CLI --snapshot-provider) */
   snapshotProvider?: string;
+  /** Verbose: log full request/response for every test */
+  verbose?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +641,7 @@ async function resolveDependencies(
     });
 
     opts.logger.recordTest(depResult, depCollection);
-    printTestResult(depResult);
+    printTestResult(depResult, opts.verbose);
     if (depResult.sqlExecSummary) {
       printSqlTestDetails(depResult);
     }
@@ -849,8 +854,10 @@ async function runHttpTest(
     timings,
     assertions,
     scriptOutput: scriptOutput.length ? scriptOutput : undefined,
-    // Attach full request + response on failures so the reporter can dump diagnostics
-    ...(finalStatus === 'failed' ? { resolvedRequest: request, resolvedResponse: response } : {}),
+    // Attach full request + response on failures (always) or when verbose (all tests)
+    ...(finalStatus === 'failed' || opts.verbose
+      ? { resolvedRequest: request, resolvedResponse: response }
+      : {}),
   };
 }
 

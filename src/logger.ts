@@ -37,11 +37,11 @@ export class RunLogger {
     this.results.push(result);
     this.collectionNames.push(collectionName);
 
-    // Don't write a log file for passing tests (unless explicitly requested)
-    // or for dependency_failed — those are secondary signals, not root causes.
-    // The root-cause failing test already has its own log.
+    // Don't write a log file for dependency_failed — those are secondary signals,
+    // not root causes.  The root-cause failing test already has its own log.
     if (result.status === 'dependency_failed') return;
-    if (!this.config.reporting?.save_passing_logs && result.status === 'passed') {
+    // Write logs for passing tests when save_passing_logs or verbose is enabled
+    if (!this.config.reporting?.save_passing_logs && !this.config.reporting?.verbose && result.status === 'passed') {
       return;
     }
 

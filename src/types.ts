@@ -692,6 +692,14 @@ export interface ShogunConfig {
     format?: 'pretty' | 'json' | 'tap';
     on_fail?: 'diff' | 'body' | 'silent';
     save_passing_logs?: boolean;
+    /**
+     * When true, attaches full request/response details to every test result
+     * (not just failures), writes per-test .log files for all tests, and prints
+     * request/response telemetry for passing tests to the console.
+     *
+     * Can also be enabled via the `--verbose` CLI flag.
+     */
+    verbose?: boolean;
   };
   /** OpenAPI spec source configuration */
   spec?: SpecConfig;
