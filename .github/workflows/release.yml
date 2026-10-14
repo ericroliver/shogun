@@ -68,7 +68,7 @@ jobs:
 
       - name: Audit npm package contents (npm pack --dry-run)
         run: |
-          npm pack --dry-run | tee pack-list.txt
+          npm pack --dry-run 2>&1 | tee pack-list.txt
           for required in dist/index.js dist/index.d.ts README.md LICENSE; do
             if ! grep -q "npm notice.*${required}" pack-list.txt; then
               echo "::error::npm package is missing required file: ${required}"

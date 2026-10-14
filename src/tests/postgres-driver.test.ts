@@ -308,9 +308,18 @@ describe('parseRoutineIdentifier() — valid identifiers', () => {
     assert.deepEqual(parsed.routine, { name: 'my_func$1', quoted: false });
   });
 
-  test('empty quoted identifier is legal', () => {
-    const parsed = parseRoutineIdentifier('""');
-    assert.deepEqual(parsed.routine, { name: '', quoted: true });
+  test('zero-length quoted identifier ("") is rejected', () => {
+    assert.throws(
+      () => parseRoutineIdentifier('""'),
+      /zero-length quoted identifier/,
+    );
+  });
+
+  test('empty quoted schema segment is rejected (schema."")', () => {
+    assert.throws(
+      () => parseRoutineIdentifier('"schema".""'),
+      /zero-length quoted identifier/,
+    );
   });
 
   test('surrounding whitespace is trimmed', () => {

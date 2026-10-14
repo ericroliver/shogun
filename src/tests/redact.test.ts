@@ -105,6 +105,29 @@ describe('redactUrl()', () => {
       'https://api.example.com/v1#section',
     );
   });
+
+  test('malformed URL that URL cannot parse: sensitive query param still redacted', () => {
+    // new URL() rejects invalid bracket hosts — the regex fallback must
+    // still mask the sensitive parameter (debug-log security contract).
+    assert.equal(
+      redactUrl('https://[invalid?token=sekret&page=2'),
+      'https://[invalid?token=[REDACTED]&page=2',
+    );
+  });
+
+  test('malformed URL with userinfo credential: userinfo still redacted', () => {
+    assert.match(
+      redactUrl('https://user:pass@[invalid/path'),
+      /^https:\/\/\[REDACTED\]@\[invalid\/path$/,
+    );
+  });
+
+  test('malformed URL without sensitive data: non-sensitive params preserved', () => {
+    assert.equal(
+      redactUrl('https://[invalid?page=2&limit=10'),
+      'https://[invalid?page=2&limit=10',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -198,6 +221,15 @@ describe('redactText()', () => {
     const redacted = redactText(text);
     assert.ok(!redacted.includes('sekret'), `secret leaked: ${redacted}`);
     assert.ok(redacted.includes('api.example.com'));
+  });
+
+  test('redacts malformed URLs with sensitive query params embedded in text', () => {
+    // Malformed URL (invalid bracket host) — new URL() throws, so the
+    // regex fallback inside redactUrl must still mask the secret.
+    const text = 'connect failed for https://[invalid?token=sekret&page=2';
+    const redacted = redactText(text);
+    assert.ok(!redacted.includes('sekret'), `secret leaked: ${redacted}`);
+    assert.ok(redacted.includes('token=[REDACTED]'), `unexpected output: ${redacted}`);
   });
 
   test('returns plain text without secrets unchanged', () => {

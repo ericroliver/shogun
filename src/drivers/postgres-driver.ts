@@ -106,7 +106,15 @@ export function parseRoutineIdentifier(proc: string): ParsedRoutineIdentifier {
           `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: unterminated quoted identifier`,
         );
       }
-      // An empty quoted identifier ("") is legal in PostgreSQL
+      // PostgreSQL rejects zero-length delimited identifiers ("zero-length
+      // delimited identifier" error), and an empty routine name can never
+      // resolve to a real routine — reject it here so malformed names never
+      // reach pool.query.
+      if (name === '') {
+        throw new Error(
+          `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: zero-length quoted identifier`,
+        );
+      }
       segments.push({ name, quoted: true });
     } else {
       // Unquoted identifier: letters, digits, underscores, dollar signs;

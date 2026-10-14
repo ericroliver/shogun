@@ -94,9 +94,16 @@ export function redactUrl(url: string): string {
   try {
     parsed = new URL(url);
   } catch {
-    // Not parseable — leave as-is (redactText's inline-header masking still
-    // applies at the text level; returning the input avoids a re-parse loop)
-    return url;
+    // Not parseable by the URL parser (e.g. invalid bracket-host syntax).
+    // SECURITY: never return the input verbatim — apply a regex fallback so
+    // userinfo credentials and sensitive query parameters are still masked,
+    // keeping the debug-log security contract for malformed URLs too.
+    return url
+      // Mask userinfo credentials (scheme://user:pass@...)
+      .replace(/^(https?:\/\/)([^@/\s]+)@/i, (_m, scheme: string) => `${scheme}${REDACTED}@`)
+      // Mask sensitive query parameter values (?key=secret&...)
+      .replace(/([?&])([^\s&"'=]+)=([^&\s"']*)/g, (m, sep: string, key: string) =>
+        SENSITIVE_QUERY_PARAMS.has(key.toLowerCase()) ? `${sep}${key}=${REDACTED}` : m);
   }
 
   // Detect what actually needs redaction so clean URLs pass through
