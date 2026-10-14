@@ -39,6 +39,267 @@ function createPoolConfig(connection: SqlConnectionConfig, timeout: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Routine identifier parsing + quoting (SQL injection prevention)
+// ---------------------------------------------------------------------------
+
+/**
+ * A parsed PostgreSQL routine reference.
+ * `quoted` records whether the segment was double-quoted in the input —
+ * quoted segments keep their exact case; unquoted segments are lowercased
+ * by PostgreSQL's identifier folding.
+ */
+export interface ParsedRoutineIdentifier {
+  schema: { name: string; quoted: boolean } | null;
+  routine: { name: string; quoted: boolean };
+}
+
+/**
+ * Parse and validate a routine reference from test configuration.
+ *
+ * Accepted forms (whitespace-free, at most `schema.routine`):
+ *   - `myfunc`                      -> routine "myfunc" (unquoted -> folded)
+ *   - `myschema.myfunc`             -> schema "myschema", routine "myfunc"
+ *   - `"My Func"`                   -> routine "My Func" (exact case preserved)
+ *   - `"my schema"."My.Func"`       -> quoted segments keep case + embedded dots
+ *
+ * Anything else — semicolons, comments, parentheses, operators, whitespace
+ * between segments, more than two segments — is rejected. This is the guard
+ * that keeps routine names from ever changing SQL syntax when interpolated
+ * into `CALL ...` / `SELECT * FROM ...` statements.
+ *
+ * Throws Error with a descriptive message on invalid input.
+ */
+export function parseRoutineIdentifier(proc: string): ParsedRoutineIdentifier {
+  const input = String(proc ?? '').trim();
+  if (input === '') {
+    throw new Error('Invalid PostgreSQL routine identifier: empty string');
+  }
+
+  // Split into segments on '.' — but dots inside double-quoted segments are
+  // part of the identifier, so we need a small scanner, not split('.').
+  const segments: Array<{ name: string; quoted: boolean }> = [];
+  let i = 0;
+
+  while (i < input.length) {
+    if (input[i] === '"') {
+      // Quoted identifier: read until closing quote, "" is an escaped quote
+      let name = '';
+      i++; // skip opening quote
+      let closed = false;
+      while (i < input.length) {
+        if (input[i] === '"') {
+          if (input[i + 1] === '"') {
+            name += '"';
+            i += 2;
+          } else {
+            i++; // skip closing quote
+            closed = true;
+            break;
+          }
+        } else {
+          name += input[i] ?? '';
+          i++;
+        }
+      }
+      if (!closed) {
+        throw new Error(
+          `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: unterminated quoted identifier`,
+        );
+      }
+      // An empty quoted identifier ("") is legal in PostgreSQL
+      segments.push({ name, quoted: true });
+    } else {
+      // Unquoted identifier: letters, digits, underscores, dollar signs;
+      // must start with a letter or underscore.
+      const rest = input.slice(i);
+      const m = rest.match(/^[A-Za-z_][A-Za-z0-9_$]*/);
+      if (!m) {
+        throw new Error(
+          `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: unexpected character ` +
+          `${JSON.stringify(rest[0] ?? '')} at position ${i}. ` +
+          `Use a plain identifier, schema.routine, or double-quoted identifiers like "My Routine"`,
+        );
+      }
+      segments.push({ name: m[0], quoted: false });
+      i += m[0].length;
+    }
+
+    // After a segment: end of input, or a '.' separating the next segment
+    if (i < input.length) {
+      if (input[i] !== '.') {
+        throw new Error(
+          `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: unexpected character ` +
+          `${JSON.stringify(input[i])} at position ${i}. ` +
+          `Use a plain identifier, schema.routine, or double-quoted identifiers like "My Routine"`,
+        );
+      }
+      i++; // consume '.'
+      if (i >= input.length) {
+        throw new Error(
+          `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: trailing '.'`,
+        );
+      }
+    }
+  }
+
+  if (segments.length > 2) {
+    throw new Error(
+      `Invalid PostgreSQL routine identifier ${JSON.stringify(proc)}: at most schema.routine is ` +
+      `supported (got ${segments.length} segments). PostgreSQL routine calls cannot cross databases`,
+    );
+  }
+
+  if (segments.length === 2) {
+    return { schema: segments[0]!, routine: segments[1]! };
+  }
+  return { schema: null, routine: segments[0]! };
+}
+
+/**
+ * Render a parsed identifier segment as a safely-quoted PostgreSQL identifier.
+ *
+ * - Quoted segments: exact content, embedded quotes doubled -> "My ""Func"""
+ * - Unquoted segments: lowercased (PostgreSQL identifier folding) then quoted,
+ *   so the rendered SQL resolves to exactly the object the user's raw SQL
+ *   would have resolved to — never a different object due to case handling.
+ */
+function quoteIdentifierSegment(segment: { name: string; quoted: boolean }): string {
+  const name = segment.quoted ? segment.name : segment.name.toLowerCase();
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+/**
+ * Parse + validate a routine reference and render it as a fully-quoted,
+ * injection-safe `schema.routine` string.
+ *
+ * Unqualified routine names default to the `public` schema (previous
+ * behavior, now preserved with correct quoting).
+ */
+export function buildSafeQualifiedRoutine(proc: string): string {
+  const parsed = parseRoutineIdentifier(proc);
+  const schema = parsed.schema ?? { name: 'public', quoted: false };
+  return `${quoteIdentifierSegment(schema)}.${quoteIdentifierSegment(parsed.routine)}`;
+}
+
+// ---------------------------------------------------------------------------
+// SQL-aware @param placeholder rewriting
+// ---------------------------------------------------------------------------
+
+/**
+ * Rewrite @paramName placeholders in a query to $N positional syntax.
+ *
+ * SQL-aware: only rewrites placeholders in *code* context. Placeholders
+ * inside these lexical regions are left untouched:
+ *   - single-quoted strings        'it''s @name'
+ *   - dollar-quoted strings        $tag$ ... @name ... $tag$ (also $$...$$)
+ *   - double-quoted identifiers    "@name"
+ *   - line comments                -- @name
+ *   - block comments (nested, like PostgreSQL) — text between block-comment delimiters
+ *
+ * A leading @@ (e.g. @@version, @@rowcount) is never rewritten. Unknown
+ * @names in code context are left alone (could be system variables).
+ */
+export function rewriteQueryPlaceholders(
+  query: string,
+  paramMap: Map<string, number>,
+): string {
+  let out = '';
+  let code = ''; // buffered code-context text pending placeholder rewrite
+  let i = 0;
+  const n = query.length;
+
+  const flushCode = () => {
+    if (code !== '') {
+      out += code.replace(/(?<!@)@(\w+)/g, (match, name: string) => {
+        const pos = paramMap.get(name);
+        return pos !== undefined ? `$${pos}` : match;
+      });
+      code = '';
+    }
+  };
+
+  while (i < n) {
+    const ch = query[i]!;
+    const next = query[i + 1];
+
+    // Line comment: -- until end of line
+    if (ch === '-' && next === '-') {
+      flushCode();
+      let j = i;
+      while (j < n && query[j] !== '\n') j++;
+      out += query.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // Block comment: /* ... */ (PostgreSQL nests block comments)
+    if (ch === '/' && next === '*') {
+      flushCode();
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (query[j] === '/' && query[j + 1] === '*') { depth++; j += 2; }
+        else if (query[j] === '*' && query[j + 1] === '/') { depth--; j += 2; }
+        else j++;
+      }
+      out += query.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // Single-quoted string: '...' with '' escape
+    if (ch === "'") {
+      flushCode();
+      let j = i + 1;
+      while (j < n) {
+        if (query[j] === "'") {
+          if (query[j + 1] === "'") j += 2; // escaped quote
+          else { j++; break; }
+        } else j++;
+      }
+      out += query.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // Double-quoted identifier: "..." with "" escape
+    if (ch === '"') {
+      flushCode();
+      let j = i + 1;
+      while (j < n) {
+        if (query[j] === '"') {
+          if (query[j + 1] === '"') j += 2; // escaped quote
+          else { j++; break; }
+        } else j++;
+      }
+      out += query.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    // Dollar-quoted string: $tag$ ... $tag$ (tag: empty or identifier-like,
+    // must not start with a digit — so $1 placeholders never match here)
+    if (ch === '$') {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(query.slice(i));
+      if (m) {
+        const delim = m[0]; // e.g. $$ or $tag$
+        const end = query.indexOf(delim, i + delim.length);
+        flushCode();
+        const j = end === -1 ? n : end + delim.length;
+        out += query.slice(i, j);
+        i = j;
+        continue;
+      }
+    }
+
+    code += ch;
+    i++;
+  }
+
+  flushCode();
+  return out;
+}
+// ---------------------------------------------------------------------------
 // Driver implementation
 // ---------------------------------------------------------------------------
 
@@ -133,18 +394,11 @@ export class PostgresDriver implements SqlDriver {
   }
 
   /**
-   * Rewrite @paramName placeholders in a query to $N positional syntax.
-   * Uses a negative lookbehind to avoid replacing @@ sequences
-   * (e.g. @@version, @@rowcount).
+   * Rewrite @paramName placeholders to $N positional syntax, delegating to
+   * the SQL-aware module-level rewriteQueryPlaceholders().
    */
   private rewriteQueryPlaceholders(query: string, paramMap: Map<string, number>): string {
-    return query.replace(/(?<!@)@(\w+)/g, (match, name: string) => {
-      const pos = paramMap.get(name);
-      if (pos !== undefined) {
-        return `$${pos}`;
-      }
-      return match; // Leave unknown @names alone (could be system variables)
-    });
+    return rewriteQueryPlaceholders(query, paramMap);
   }
 
   /**
@@ -170,11 +424,15 @@ export class PostgresDriver implements SqlDriver {
     // We use parameterized query to pass values safely
     const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
 
-    // Determine if proc is qualified (schema.name) or bare
-    const qualifiedProc = proc.includes('.') ? proc : `public.${proc}`;
-
     const startTime = Date.now();
     try {
+      // SECURITY: the routine name comes from test configuration and is
+      // interpolated into the CALL/SELECT statement. It is parsed, validated,
+      // and fully quoted by buildSafeQualifiedRoutine() — anything that could
+      // change SQL syntax (semicolons, comments, parentheses, operators) is
+      // rejected with a clear error instead of being executed.
+      const qualifiedProc = buildSafeQualifiedRoutine(proc);
+
       // Try CALL first (procedures in PG 11+)
       let result: import('pg').QueryResult;
       try {
@@ -471,14 +729,11 @@ export class PostgresDriver implements SqlDriver {
     const pool = new Pool(createPoolConfig(connection, timeout));
 
     try {
-      // Parse "schema.name" or bare "name" (assume public if no schema)
-      const parts = proc.split('.');
-      let schema = 'public';
-      let name = proc;
-      if (parts.length >= 2) {
-        schema = parts[0]!;
-        name = parts[1]!;
-      }
+      // Parse + validate "schema.name" or bare "name" (public assumed if bare).
+      // Quoted identifiers like "My.Proc" are handled correctly by the parser.
+      const parsed = parseRoutineIdentifier(proc);
+      const schema = parsed.schema?.name ?? 'public';
+      const name = parsed.routine.name;
 
       const result = await pool.query(
         `SELECT pg_get_functiondef(p.oid) AS definition
@@ -524,14 +779,11 @@ export class PostgresDriver implements SqlDriver {
     const pool = new Pool(createPoolConfig(connection, timeout));
 
     try {
-      // Parse "schema.name" or bare "name"
-      const parts = proc.split('.');
-      let schema = 'public';
-      let name = proc;
-      if (parts.length >= 2) {
-        schema = parts[0]!;
-        name = parts[1]!;
-      }
+      // Parse + validate "schema.name" or bare "name" (public assumed if bare).
+      // Quoted identifiers like "My.Proc" are handled correctly by the parser.
+      const parsed = parseRoutineIdentifier(proc);
+      const schema = parsed.schema?.name ?? 'public';
+      const name = parsed.routine.name;
 
       // PostgreSQL dependency tracking is through pg_depend + pg_rewrite.
       // We query for objects the function/procedure depends on (referenced objects).

@@ -1,0 +1,59 @@
+name: CI
+
+# Pull-request and main-branch quality gates:
+#   - frozen dependency install (npm ci)
+#   - type-check (tsc --noEmit)
+#   - full unit test suite (npm run test:unit)
+#   - build + CLI smoke test (--help / --version, version-drift check)
+# on Linux, Windows, and macOS — the platforms shogun ships binaries for.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies (frozen)
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test CLI (--help / --version)
+        shell: bash
+        run: |
+          node dist/index.js --help > /dev/null
+          ACTUAL="$(node dist/index.js --version)"
+          EXPECTED="$(node -p "require('./package.json').version")"
+          echo "CLI --version: ${ACTUAL} (package.json: ${EXPECTED})"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Version drift — CLI reports ${ACTUAL} but package.json says ${EXPECTED}"
+            exit 1
+          fi

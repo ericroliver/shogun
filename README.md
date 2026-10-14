@@ -459,7 +459,7 @@ Shogun reads env vars from both the `.env` file and `process.env`, so CI secrets
 | Variable | Purpose |
 |----------|---------|
 | `BASE_URL` | Base URL for all HTTP requests (required) |
-| `AUTH_TOKEN` | Injected as `Authorization: Bearer <token>` header if set |
+| `AUTH_TOKEN` | Injected as `Authorization: Bearer <token>` header if set. Skipped when the request already defines an `Authorization` header (any casing); an explicit empty `authorization: ''` header opts out of injection |
 | `TIMEOUT` | Request timeout in seconds (default: 10) |
 
 ---

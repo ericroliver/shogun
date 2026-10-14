@@ -226,6 +226,8 @@ Verbose mode attaches `resolvedRequest` and `resolvedResponse` to every test res
 
 You can also set `SHOGUN_DEBUG=1` as an environment variable for debug-level stderr output from the runner internals.
 
+**Debug log security contract:** SHOGUN_DEBUG output is automatically redacted. Sensitive header values (`Authorization`, `Cookie`, API keys, ... — matched case-insensitively), credential-bearing curl options, and sensitive URL query parameters (`token`, `api_key`, `password`, ...) are replaced with `[REDACTED]` before anything is written to stderr. Never rely on debug output to capture real credentials — and never paste unredacted credentials into bug reports.
+
 ---
 
 ## Rule 9 — Suite Vars and the Fixture Chain

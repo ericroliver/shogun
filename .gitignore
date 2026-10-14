@@ -5,7 +5,9 @@ bin/
 reference/
 local*
 
-coverage*
+# Coverage tool output directories (istanbul/nyc/c8) — root only, so test
+# files like src/tests/coverage-matcher.test.ts are never ignored
+/coverage/
 
 # Generated test run output — never commit
 runs/

@@ -14,7 +14,7 @@ import * as path from 'path';
 // ---------------------------------------------------------------------------
 
 const SHOGUN_CONFIG = `# shogun.config.yaml — Global configuration for this test repo
-# Docs: https://github.com/your-org/shogun
+# Docs: https://github.com/ericroliver/shogun
 version: 1
 
 defaults:
@@ -234,7 +234,7 @@ export function normalisePaginatedList<T>(body: {
 
 const README = `# My Shogun Test Repo
 
-API tests powered by [shogun](https://github.com/your-org/shogun) — a shell-first, TypeScript-enhanced API testing CLI.
+API tests powered by [shogun](https://github.com/ericroliver/shogun) — a shell-first, TypeScript-enhanced API testing CLI.
 
 ## Quick Start
 
