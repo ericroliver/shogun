@@ -62,15 +62,25 @@ describe('runSuiteValidation — failure path', () => {
 describe('runSuiteValidation — environment injection', () => {
   test('env vars from the loaded .env are available to the command', () => {
     const env: EnvVars = { MY_TEST_VAR: 'hello123' };
-    // Command checks the env var and exits 0 if present
-    const result = runSuiteValidation('test "$MY_TEST_VAR" = "hello123"', env, 'EnvSuite');
+    // Command checks the env var and exits 0 if present.
+    // Uses node (not POSIX `test`) so it works with any shell —
+    // cmd.exe on Windows does not expand "$VAR".
+    const result = runSuiteValidation(
+      'node -e "process.exit(process.env.MY_TEST_VAR === \'hello123\' ? 0 : 1)"',
+      env,
+      'EnvSuite',
+    );
     assert.equal(result.ok, true);
     assert.equal(result.exitCode, 0);
   });
 
   test('command fails when expected env var is not set', () => {
     const env: EnvVars = {};
-    const result = runSuiteValidation('test -n "$MY_MISSING_VAR"', env, 'EnvSuite');
+    const result = runSuiteValidation(
+      'node -e "process.exit(process.env.MY_MISSING_VAR ? 0 : 1)"',
+      env,
+      'EnvSuite',
+    );
     assert.equal(result.ok, false);
   });
 
@@ -78,7 +88,11 @@ describe('runSuiteValidation — environment injection', () => {
     // Set a var in process.env, then override via the env param
     process.env.SHOGUN_TEST_OVERRIDE = 'from_process';
     const env: EnvVars = { SHOGUN_TEST_OVERRIDE: 'from_param' };
-    const result = runSuiteValidation('test "$SHOGUN_TEST_OVERRIDE" = "from_param"', env, 'OverrideSuite');
+    const result = runSuiteValidation(
+      'node -e "process.exit(process.env.SHOGUN_TEST_OVERRIDE === \'from_param\' ? 0 : 1)"',
+      env,
+      'OverrideSuite',
+    );
     assert.equal(result.ok, true);
     delete process.env.SHOGUN_TEST_OVERRIDE;
   });

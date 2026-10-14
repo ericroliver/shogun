@@ -132,25 +132,55 @@ describe('checkBackend() — output formatting', () => {
 describe('checkBackend() — missing dependencies detail', () => {
 
   test('when deps missing, output shows "Error: Missing dependencies" and fix hint', async () => {
-    // On Windows, unix backend will be missing deps
-    if (process.platform !== 'win32') {
-      // On Unix with curl/jq installed, this test can't exercise the missing-deps path.
-      // We'll just verify it doesn't crash.
-      const { exitCode } = await captureOutput(() =>
-        checkBackend({ backend: 'unix' }),
-      );
-      assert.ok(exitCode === 0 || exitCode === 1);
-      return;
-    }
-
+    // Deterministic on every platform: inject dependency results directly.
+    // (Live probing is unreliable for this path — e.g. GitHub's Windows
+    // runners ship curl, jq, and diff, so the unix backend is "Ready" there.)
     const { exitCode, stdout } = await captureOutput(() =>
-      checkBackend({ backend: 'unix' }),
+      checkBackend({
+        backend: 'unix',
+        deps: [
+          { name: 'curl', found: true, optional: false },
+          { name: 'jq', found: false, optional: false },
+          { name: 'diff', found: true, optional: true },
+        ],
+      }),
     );
 
     assert.equal(exitCode, 1);
-    assert.match(stdout, /Error: Missing dependencies/);
+    assert.match(stdout, /Error: Missing dependencies: jq/);
     assert.match(stdout, /Fix:/);
     assert.match(stdout, /--backend powershell/);
+  });
+
+  test('when all required deps are found, exits 0 with Ready status', async () => {
+    const { exitCode, stdout } = await captureOutput(() =>
+      checkBackend({
+        backend: 'unix',
+        deps: [
+          { name: 'curl', found: true, optional: false },
+          { name: 'jq', found: true, optional: false },
+        ],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /Status:\s+Ready/);
+  });
+
+  test('missing optional deps do not fail the check', async () => {
+    const { exitCode, stdout } = await captureOutput(() =>
+      checkBackend({
+        backend: 'unix',
+        deps: [
+          { name: 'curl', found: true, optional: false },
+          { name: 'jq', found: true, optional: false },
+          { name: 'diff', found: false, optional: true },
+        ],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /Status:\s+Ready/);
   });
 });
 

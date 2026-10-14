@@ -11,6 +11,12 @@ import type { DependencyCheck } from '../backend-interface.js';
 
 interface CheckBackendOptions {
   backend?: string;
+  /**
+   * Test hook: skip live dependency probing and use these results directly.
+   * Lets tests exercise the missing-dependencies path deterministically on
+   * any platform (some CI images ship curl/jq even on Windows).
+   */
+  deps?: DependencyCheck[];
 }
 
 export async function checkBackend(opts: CheckBackendOptions): Promise<number> {
@@ -24,12 +30,16 @@ export async function checkBackend(opts: CheckBackendOptions): Promise<number> {
   console.log('Dependencies:');
 
   let deps: DependencyCheck[];
-  try {
-    deps = await backend.checkDependencies();
-  } catch (err: any) {
-    console.error(`Status: Error`);
-    console.error(`Error: ${err.message}`);
-    return 1;
+  if (opts.deps) {
+    deps = opts.deps;
+  } else {
+    try {
+      deps = await backend.checkDependencies();
+    } catch (err: any) {
+      console.error(`Status: Error`);
+      console.error(`Error: ${err.message}`);
+      return 1;
+    }
   }
 
   for (const dep of deps) {
