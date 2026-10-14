@@ -690,6 +690,10 @@ shogun snapshot --env QA
 # Update a single test's baseline
 shogun snapshot --file tests/collections/agents/get-agents.yaml
 
+# Single-file mode with an explicit collection — baselines are written to
+# expected/<collection>/ instead of expected/default/ (also works for `run --file`)
+shogun snapshot --file tests/collections/agents/get-agents.yaml --collection agents
+
 # Snapshot with suite vars (e.g., WORKSPACE_NAME)
 shogun snapshot --suite api-testapp-1
 

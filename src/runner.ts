@@ -105,6 +105,9 @@ export async function runTests(opts: RunOptions): Promise<RunSummary> {
     env, vars, baseUrl, config, scriptsDir, cwd, collectionsDir,
     snapshotMode: opts.snapshotMode, session, logger,
     runtimeParams: parseRuntimeParams(opts.params),
+    collectionName: opts.file
+      ? (Array.isArray(opts.collection) ? opts.collection[0] : opts.collection)
+      : undefined,
     restoreSnapshot: opts.restoreSnapshot,
     noSnapshot: opts.noSnapshot,
     snapshotDatabase: opts.snapshotDatabase,
@@ -327,6 +330,8 @@ interface SharedRunOpts {
   snapshotProvider?: string;
   /** Verbose: log full request/response for every test */
   verbose?: boolean;
+  /** Collection name for --file mode baseline paths (from CLI --collection) */
+  collectionName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,7 +1490,10 @@ async function runSingleFile(
   opts: SharedRunOpts,
 ): Promise<TestResult> {
   const test = loadTestFile(file, opts.env);
-  return runSingleTest(test, file, opts);
+  // --file mode: flow --collection (CLI) into baseline capture so snapshots/diffs
+  // read-write expected/<collection>/ instead of expected/default/. The test YAML's
+  // own `collection:` field remains the fallback (see getExpectedPathFromTest).
+  return runSingleTest(test, file, { ...opts, collectionName: opts.collectionName });
 }
 
 // ---------------------------------------------------------------------------
