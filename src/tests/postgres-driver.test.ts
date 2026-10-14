@@ -20,6 +20,11 @@ import '../drivers/postgres-driver.js';
 import '../drivers/mssql-driver.js';
 import { SqlDriverRegistry } from '../sql-driver.js';
 import { PostgresDriver } from '../drivers/postgres-driver.js';
+import {
+  parseRoutineIdentifier,
+  buildSafeQualifiedRoutine,
+  rewriteQueryPlaceholders,
+} from '../drivers/postgres-driver.js';
 
 // ===========================================================================
 // Driver registration
@@ -259,5 +264,236 @@ describe('PostgresDriver — proc name parsing', () => {
     }
     assert.equal(schema, 'myschema');
     assert.equal(name, 'my_function');
+  });
+});
+
+// ===========================================================================
+// Routine identifier parsing + quoting (SQL injection prevention — #29)
+// ===========================================================================
+
+describe('parseRoutineIdentifier() — valid identifiers', () => {
+
+  test('bare unquoted routine name', () => {
+    const parsed = parseRoutineIdentifier('myfunc');
+    assert.equal(parsed.schema, null);
+    assert.deepEqual(parsed.routine, { name: 'myfunc', quoted: false });
+  });
+
+  test('qualified schema.routine', () => {
+    const parsed = parseRoutineIdentifier('myschema.myfunc');
+    assert.deepEqual(parsed.schema, { name: 'myschema', quoted: false });
+    assert.deepEqual(parsed.routine, { name: 'myfunc', quoted: false });
+  });
+
+  test('quoted routine name with spaces', () => {
+    const parsed = parseRoutineIdentifier('"My Func"');
+    assert.equal(parsed.schema, null);
+    assert.deepEqual(parsed.routine, { name: 'My Func', quoted: true });
+  });
+
+  test('quoted schema and routine with embedded dots', () => {
+    const parsed = parseRoutineIdentifier('"my schema"."My.Func"');
+    assert.deepEqual(parsed.schema, { name: 'my schema', quoted: true });
+    assert.deepEqual(parsed.routine, { name: 'My.Func', quoted: true });
+  });
+
+  test('embedded quotes are unescaped ("" → ")', () => {
+    const parsed = parseRoutineIdentifier('"Weird""Quote"');
+    assert.deepEqual(parsed.routine, { name: 'Weird"Quote', quoted: true });
+  });
+
+  test('unquoted identifiers allow $ (PL/pgSQL style names)', () => {
+    const parsed = parseRoutineIdentifier('my$schema.my_func$1');
+    assert.deepEqual(parsed.schema, { name: 'my$schema', quoted: false });
+    assert.deepEqual(parsed.routine, { name: 'my_func$1', quoted: false });
+  });
+
+  test('zero-length quoted identifier ("") is rejected', () => {
+    assert.throws(
+      () => parseRoutineIdentifier('""'),
+      /zero-length quoted identifier/,
+    );
+  });
+
+  test('empty quoted schema segment is rejected (schema."")', () => {
+    assert.throws(
+      () => parseRoutineIdentifier('"schema".""'),
+      /zero-length quoted identifier/,
+    );
+  });
+
+  test('surrounding whitespace is trimmed', () => {
+    const parsed = parseRoutineIdentifier('  myfunc  ');
+    assert.deepEqual(parsed.routine, { name: 'myfunc', quoted: false });
+  });
+});
+
+describe('parseRoutineIdentifier() — malicious / invalid identifiers rejected', () => {
+
+  const malicious = [
+    'myfunc; DROP TABLE users; --',
+    'myfunc--comment',
+    'myfunc/*comment*/',
+    'a.b.c',
+    'schema.func(1)',
+    'func name',
+    '"unterminated',
+    'func(',
+    '',
+    '   ',
+    '1func',
+    'func-x',
+    'schema .func',
+    "func'; SELECT pg_sleep(10); --",
+    'public.myfunc) AS x; DROP TABLE t; --',
+  ];
+
+  for (const bad of malicious) {
+    test(`rejects ${JSON.stringify(bad)}`, () => {
+      assert.throws(
+        () => parseRoutineIdentifier(bad),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.match(err.message, /Invalid PostgreSQL routine identifier/);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+describe('buildSafeQualifiedRoutine() — safe SQL rendering', () => {
+
+  test('bare name defaults to public schema, fully quoted', () => {
+    assert.equal(buildSafeQualifiedRoutine('myfunc'), '"public"."myfunc"');
+  });
+
+  test('qualified name rendered fully quoted', () => {
+    assert.equal(buildSafeQualifiedRoutine('myschema.myfunc'), '"myschema"."myfunc"');
+  });
+
+  test('unquoted mixed-case names are folded to lowercase (PostgreSQL semantics)', () => {
+    // Raw SQL 'MySchema.MyFunc' resolves to myschema.myfunc — preserve that
+    assert.equal(buildSafeQualifiedRoutine('MySchema.MyFunc'), '"myschema"."myfunc"');
+  });
+
+  test('quoted names keep exact case', () => {
+    assert.equal(buildSafeQualifiedRoutine('"MySchema"."MyFunc"'), '"MySchema"."MyFunc"');
+  });
+
+  test('quoted names with embedded quotes are escaped (doubling)', () => {
+    assert.equal(buildSafeQualifiedRoutine('"Weird""Quote"'), '"public"."Weird""Quote"');
+  });
+
+  test('quoted names with embedded dots stay a single identifier', () => {
+    assert.equal(buildSafeQualifiedRoutine('"My.Func"'), '"public"."My.Func"');
+  });
+
+  test('renders injection attempts impossible — malicious input throws', () => {
+    assert.throws(() => buildSafeQualifiedRoutine('myfunc; DROP TABLE users; --'));
+    assert.throws(() => buildSafeQualifiedRoutine('myfunc(1)'));
+    assert.throws(() => buildSafeQualifiedRoutine('a.b.c'));
+  });
+});
+
+// ===========================================================================
+// SQL-aware placeholder rewriting (#36)
+// ===========================================================================
+
+describe('rewriteQueryPlaceholders() — SQL lexical awareness', () => {
+
+  const paramMap = new Map<string, number>([['name', 1], ['limit', 2]]);
+
+  test('rewrites placeholders in plain code context', () => {
+    assert.equal(
+      rewriteQueryPlaceholders('SELECT * FROM t WHERE u = @name LIMIT @limit', paramMap),
+      'SELECT * FROM t WHERE u = $1 LIMIT $2',
+    );
+  });
+
+  test('does NOT rewrite inside single-quoted strings', () => {
+    const q = "SELECT '@name' AS literal, @name AS code";
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), "SELECT '@name' AS literal, $1 AS code");
+  });
+
+  test('does NOT rewrite inside single-quoted strings with escaped quotes', () => {
+    const q = "SELECT 'it''s @name' AS literal, @name AS code";
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), "SELECT 'it''s @name' AS literal, $1 AS code");
+  });
+
+  test('does NOT rewrite inside double-quoted identifiers', () => {
+    const q = 'SELECT "@name" AS ident, @name AS code';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT "@name" AS ident, $1 AS code');
+  });
+
+  test('does NOT rewrite inside line comments', () => {
+    const q = '-- @name is a comment\nSELECT @name';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), '-- @name is a comment\nSELECT $1');
+  });
+
+  test('does NOT rewrite inside block comments', () => {
+    const q = '/* @name block comment */ SELECT @name';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), '/* @name block comment */ SELECT $1');
+  });
+
+  test('does NOT rewrite inside nested block comments', () => {
+    const q = '/* outer /* @name nested */ still comment */ SELECT @name';
+    assert.equal(
+      rewriteQueryPlaceholders(q, paramMap),
+      '/* outer /* @name nested */ still comment */ SELECT $1',
+    );
+  });
+
+  test('does NOT rewrite inside dollar-quoted strings (tagless $$)', () => {
+    const q = 'SELECT $$body with @name inside$$ AS dq, @name AS code';
+    assert.equal(
+      rewriteQueryPlaceholders(q, paramMap),
+      'SELECT $$body with @name inside$$ AS dq, $1 AS code',
+    );
+  });
+
+  test('does NOT rewrite inside dollar-quoted strings (tagged $fn$)', () => {
+    const q = 'SELECT $tag$ @name $tag$ AS dq, @name AS code';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT $tag$ @name $tag$ AS dq, $1 AS code');
+  });
+
+  test('$1 positional placeholders are not treated as dollar-quote openers', () => {
+    const q = 'SELECT * FROM t WHERE a = $1 AND b = @limit';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT * FROM t WHERE a = $1 AND b = $2');
+  });
+
+  test('@@ system variables are still preserved', () => {
+    const q = 'SELECT @@version, @name';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT @@version, $1');
+  });
+
+  test('unknown @names in code context are left alone', () => {
+    const q = 'SELECT * FROM t WHERE u = @unknown';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT * FROM t WHERE u = @unknown');
+  });
+
+  test('repeated parameter names all rewritten', () => {
+    const q = 'SELECT @name, @name, @limit, @name';
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), 'SELECT $1, $1, $2, $1');
+  });
+
+  test('realistic function body with mixed contexts', () => {
+    const q = [
+      'SELECT u.name, count(*)',
+      'FROM users u -- @name in comment',
+      "WHERE u.display_name = '@name displayed'",
+      '  AND u.real_name = @name',
+      "  AND u.note = $notes$ contains @name $notes$",
+      'LIMIT @limit',
+    ].join('\n');
+    const expected = [
+      'SELECT u.name, count(*)',
+      'FROM users u -- @name in comment',
+      "WHERE u.display_name = '@name displayed'",
+      '  AND u.real_name = $1',
+      "  AND u.note = $notes$ contains @name $notes$",
+      'LIMIT $2',
+    ].join('\n');
+    assert.equal(rewriteQueryPlaceholders(q, paramMap), expected);
   });
 });

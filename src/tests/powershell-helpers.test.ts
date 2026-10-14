@@ -19,6 +19,7 @@ import {
   parseCookies,
   buildPsUrl,
   buildPsHeaders,
+  stripAnsiEscapes,
   formatHeadersForPowerShell,
   buildBodyArg,
   convertIgnoreFieldToPowerShell,
@@ -636,5 +637,66 @@ describe('formatSimpleDiff()', () => {
   test('handles one empty and one non-empty', () => {
     const result = formatSimpleDiff('', 'content');
     assert.ok(result.includes('+ content'));
+  });
+});
+
+// ===========================================================================
+// buildPsHeaders — case-insensitive Authorization detection (#35 parity)
+// ===========================================================================
+
+describe('buildPsHeaders() — case-insensitive Authorization detection', () => {
+  test('does not inject when lowercase authorization header is present', () => {
+    const req: ShogunRequest = {
+      method: 'GET', url: 'http://api.com', path: '/',
+      headers: { authorization: 'Custom scheme' }, params: {},
+    };
+    const headers = buildPsHeaders(req, { AUTH_TOKEN: 'my-token' });
+    assert.equal(headers['authorization'], 'Custom scheme');
+    assert.equal(headers['Authorization'], undefined);
+  });
+
+  test('does not inject when UPPERCASE AUTHORIZATION header is present', () => {
+    const req: ShogunRequest = {
+      method: 'GET', url: 'http://api.com', path: '/',
+      headers: { AUTHORIZATION: 'Custom scheme' }, params: {},
+    };
+    const headers = buildPsHeaders(req, { AUTH_TOKEN: 'my-token' });
+    assert.equal(headers['AUTHORIZATION'], 'Custom scheme');
+    assert.equal(headers['Authorization'], undefined);
+  });
+
+  test('explicit empty authorization header suppresses injection (opt-out)', () => {
+    const req: ShogunRequest = {
+      method: 'GET', url: 'http://api.com', path: '/',
+      headers: { authorization: '' }, params: {},
+    };
+    const headers = buildPsHeaders(req, { AUTH_TOKEN: 'my-token' });
+    assert.equal(headers['authorization'], '');
+    assert.equal(headers['Authorization'], undefined);
+  });
+});
+
+// ===========================================================================
+// stripAnsiEscapes
+// ===========================================================================
+
+describe('stripAnsiEscapes()', () => {
+  test('strips CSI keypad-mode sequences pwsh emits on some platforms', () => {
+    // Actual output observed from `pwsh -Command -` on Linux:
+    // "\x1b[?1h\x1b[?1lhello\x1b[?1h"
+    const noisy = '\x1b[?1h\x1b[?1lhello\x1b[?1h';
+    assert.equal(stripAnsiEscapes(noisy), 'hello');
+  });
+
+  test('strips color sequences', () => {
+    assert.equal(stripAnsiEscapes('\x1b[31mred\x1b[0m'), 'red');
+  });
+
+  test('leaves plain text untouched', () => {
+    assert.equal(stripAnsiEscapes('plain text\nlines'), 'plain text\nlines');
+  });
+
+  test('strips single-character escape sequences', () => {
+    assert.equal(stripAnsiEscapes('a\x1bMb'), 'ab');
   });
 });

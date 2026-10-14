@@ -201,7 +201,16 @@ export function buildPsHeaders(
     'Accept': 'application/json',
     ...req.headers,
   };
-  if (autoInjectAuth && env.AUTH_TOKEN && !headers['Authorization']) {
+  // Auto-inject AUTH_TOKEN as Bearer only when no Authorization header is set.
+  // HTTP header names are case-insensitive: any casing (Authorization,
+  // authorization, AUTHORIZATION, ...) counts as "already set". An explicit
+  // empty-string value is the documented opt-out for auto-injection —
+  // parity with the Unix backend.
+  const autoInject = autoInjectAuth !== false;
+  const hasAuthorizationHeader = Object.keys(headers).some(
+    (k) => k.trim().toLowerCase() === 'authorization',
+  );
+  if (autoInject && env.AUTH_TOKEN && !hasAuthorizationHeader) {
     const token = env.AUTH_TOKEN;
     headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
@@ -268,6 +277,18 @@ export function buildBodyArg(req: ShogunRequest): string {
 export function convertIgnoreFieldToPowerShell(field: string): string {
   const key = field.startsWith('.') ? field.slice(1) : field;
   return `$json.PSObject.Properties.Remove("${key}")`;
+}
+
+/**
+ * Strip ANSI/VT escape sequences (e.g. \x1B[?1h keypad-mode sequences) from
+ * PowerShell stdout. pwsh emits these in some environments (seen on Linux
+ * with stdin-piped commands) even with -NoProfile -NonInteractive; they
+ * pollute output used for diffs and assertions.
+ */
+export function stripAnsiEscapes(text: string): string {
+  // Matches CSI sequences (\x1B[ ... final byte) and other escape sequences
+  // (\x1B followed by a single @-Z[\]^_ character, e.g. \x1BM).
+  return text.replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g, '');
 }
 
 /**
@@ -808,7 +829,7 @@ ${escapeHereString(actual)}
       });
       proc.on('close', (code: number) => {
         if (settled) return; // already rejected via 'error' event
-        if (code === 0) { settled = true; resolve(stdout); }
+        if (code === 0) { settled = true; resolve(stripAnsiEscapes(stdout)); }
         else { settled = true; reject(new Error(stderr || `PowerShell exited ${code}`)); }
       });
     });

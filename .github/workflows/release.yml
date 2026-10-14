@@ -1,16 +1,108 @@
 name: Release
 
+# Tag-driven release pipeline (tags: v*).
+#
+# Guarantees (#38):
+#   1. Tag must match package.json version (no version drift)
+#   2. Type-check + full unit tests + npm package audit must pass first
+#   3. Every standalone binary is built on its native runner and smoke-tested
+#      (--help / --version) with its version asserted against package.json
+#   4. All four release assets are verified present and non-empty before
+#      the GitHub Release is created, with SHA256 checksums attached
+#   5. Least-privilege permissions: read-only everywhere except the final
+#      publish job, which needs contents:write to create the release
+
 on:
   push:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
+  validate:
+    name: Validate (version, types, tests, npm package)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$PKG_VERSION" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches package.json version ✓"
+
+      - name: Install dependencies (frozen)
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build npm package
+        run: npm run build
+
+      - name: Smoke test dist CLI and assert version
+        run: |
+          ACTUAL="$(node dist/index.js --version)"
+          EXPECTED="$(node -p "require('./package.json').version")"
+          echo "dist CLI --version: ${ACTUAL}"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Version drift — dist CLI reports ${ACTUAL} but package.json says ${EXPECTED}"
+            exit 1
+          fi
+
+      - name: Audit npm package contents (npm pack --dry-run)
+        run: |
+          npm pack --dry-run 2>&1 | tee pack-list.txt
+          for required in dist/index.js dist/index.d.ts README.md LICENSE; do
+            if ! grep -q "npm notice.*${required}" pack-list.txt; then
+              echo "::error::npm package is missing required file: ${required}"
+              exit 1
+            fi
+          done
+          echo "npm package contents verified ✓"
+
+  build:
+    name: Build + smoke test (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            os: macos-latest
+            pkg-script: pkg:macos
+            binary: bin/shogun-macos-arm64
+          - target: linux-x64
+            os: ubuntu-latest
+            pkg-script: pkg:linux
+            binary: bin/shogun-linux-x64
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            pkg-script: pkg:linux-arm64
+            binary: bin/shogun-linux-arm64
+          - target: win-x64
+            os: windows-latest
+            pkg-script: pkg:win
+            binary: bin/shogun-win-x64.exe
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -23,11 +115,67 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Install dependencies
+      - name: Install dependencies (frozen)
         run: bun install --frozen-lockfile
 
-      - name: Build all binaries
-        run: bun run pkg:all
+      - name: Build binary
+        run: bun run ${{ matrix.pkg-script }}
+
+      - name: Verify binary exists and is non-empty
+        shell: bash
+        run: |
+          if [ ! -s "${{ matrix.binary }}" ]; then
+            echo "::error::Binary ${{ matrix.binary }} is missing or empty"
+            ls -la bin/ || true
+            exit 1
+          fi
+          ls -la "${{ matrix.binary }}"
+
+      - name: Smoke test binary (--help / --version)
+        shell: bash
+        run: |
+          "${{ matrix.binary }}" --help > /dev/null
+          ACTUAL="$("${{ matrix.binary }}" --version)"
+          EXPECTED="$(node -p "require('./package.json').version")"
+          echo "Binary --version: ${ACTUAL} (package.json: ${EXPECTED})"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Version drift — binary reports ${ACTUAL} but package.json says ${EXPECTED}"
+            exit 1
+          fi
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shogun-${{ matrix.target }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bin
+          pattern: shogun-*
+          merge-multiple: true
+
+      - name: Verify all four release assets
+        run: |
+          MISSING=0
+          for asset in shogun-macos-arm64 shogun-linux-x64 shogun-linux-arm64 shogun-win-x64.exe; do
+            if [ ! -s "bin/${asset}" ]; then
+              echo "::error::Missing or empty release asset: bin/${asset}"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then ls -la bin/; exit 1; fi
+          echo "All four release assets verified ✓"
+          ls -la bin/
 
       - name: Generate SHA256 checksums
         working-directory: bin

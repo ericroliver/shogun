@@ -41,6 +41,7 @@ import type {
 import { buildEvaluationPrompt, parseEvaluatorResponse, validateCriteriaCorrespondence } from './agent-evaluator.js';
 import { resolveEvaluationConfig } from './loader.js';
 import { getSnapshotProvider, isSnapshotConfigured } from './snapshots/registry.js';
+import { redactUrl } from './redact.js';
 
 export interface RunOptions {
   env?: string;
@@ -769,7 +770,8 @@ async function runHttpTest(
   let response: ShogunResponse;
   try {
     if (process.env.SHOGUN_DEBUG) {
-      process.stderr.write(`[runner] executeRequest: ${request.method} ${request.url}\n`);
+      // SECURITY: redact sensitive query params/userinfo from the URL before logging
+      process.stderr.write(`[runner] executeRequest: ${request.method} ${redactUrl(request.url)}\n`);
     }
     response = await executeRequest(request, opts.env, {
       timeout: parseInt(opts.env.TIMEOUT ?? String(opts.config.defaults?.timeout ?? 10), 10),
@@ -780,7 +782,11 @@ async function runHttpTest(
       process.stderr.write(`[runner] executeRequest done: status=${response.status}, curlMs=${response.curlMs}, bodyLen=${response.raw.length}\n`);
     }
   } catch (err) {
-    return makeFailedResult(test.name, file, startMs, {}, `curl failed: ${err}`, scriptOutput);
+    // Transport failures (DNS/TLS/timeout/connection refused) are distinct
+    // from HTTP responses — label them clearly in the test result.
+    const isTransportFailure = err instanceof Error && err.name === 'CurlTransportError';
+    const prefix = isTransportFailure ? 'request transport failure' : 'curl failed';
+    return makeFailedResult(test.name, file, startMs, {}, `${prefix}: ${err}`, scriptOutput);
   }
 
   // Assertions

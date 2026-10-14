@@ -30,6 +30,7 @@ import type { BackendExecutor, DependencyCheck } from '../backend-interface.js';
 import { sanitizeName } from '../loader.js';
 import { parseSseResponse, isSseContentType, getAssertionBody } from '../sse.js';
 import { resolveRequestBody, isFormEncodedContentType, buildFormEncodedBody } from '../body-utils.js';
+import { redactCurlArgs, redactText, redactUrl } from '../redact.js';
 
 // ===========================================================================
 // AssertContext — moved from asserter.ts (local type, reused here)
@@ -43,6 +44,53 @@ export interface AssertContext {
   collectionName?: string;
   /** When true: write snapshot instead of diffing */
   snapshotMode?: boolean;
+}
+
+// ===========================================================================
+// Transport failure errors
+// ===========================================================================
+
+/**
+ * A spawned command exited with a nonzero status (or was killed by a signal).
+ * Carries the raw exit code, signal, and (unsanitized) stderr.
+ */
+class CommandExitError extends Error {
+  constructor(
+    readonly cmd: string,
+    readonly exitCode: number | null,
+    readonly signal: NodeJS.Signals | null,
+    readonly stderr: string,
+  ) {
+    const reason = signal ? `killed by signal ${signal}` : `exit code ${exitCode}`;
+    const detail = stderr.trim();
+    super(`command '${cmd}' failed (${reason})${detail ? `: ${detail}` : ''}`);
+    this.name = 'CommandExitError';
+  }
+}
+
+/**
+ * curl failed to complete the HTTP exchange — DNS failure, TLS error,
+ * connection refused, timeout, etc. This is a *transport* failure, distinct
+ * from an HTTP response (including 4xx/5xx, which are valid responses).
+ *
+ * `stderr` is sanitized via redact.ts before it is exposed.
+ */
+export class CurlTransportError extends Error {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+
+  constructor(opts: { exitCode?: number | null; signal?: NodeJS.Signals | null; stderr?: string }) {
+    const reason = opts.signal
+      ? `terminated by signal ${opts.signal}`
+      : `exit code ${opts.exitCode}`;
+    const detail = redactText((opts.stderr ?? '').trim());
+    super(`curl transport failure (${reason})${detail ? `: ${detail}` : ''}`);
+    this.name = 'CurlTransportError';
+    this.exitCode = opts.exitCode ?? null;
+    this.signal = opts.signal ?? null;
+    this.stderr = detail;
+  }
 }
 
 // ===========================================================================
@@ -102,10 +150,16 @@ export async function executeRequest(
   // Auto-inject AUTH_TOKEN as Bearer only when:
   //   1. auto_inject_auth is not explicitly disabled (default: true)
   //   2. AUTH_TOKEN is present in env
-  //   3. The request does not already have an Authorization header set
-  //      (uses hasOwnProperty so an explicit empty-string value suppresses injection)
+  //   3. The request does not already have an Authorization header set.
+  //      HTTP header names are case-insensitive, so any casing
+  //      (Authorization, authorization, AUTHORIZATION, ...) counts as
+  //      "already set" — including an explicit empty-string value, which is
+  //      the documented opt-out for auto-injection.
   const autoInject = opts.autoInjectAuth !== false;
-  if (autoInject && env.AUTH_TOKEN && !Object.prototype.hasOwnProperty.call(headers, 'Authorization')) {
+  const hasAuthorizationHeader = Object.keys(headers).some(
+    (k) => k.trim().toLowerCase() === 'authorization',
+  );
+  if (autoInject && env.AUTH_TOKEN && !hasAuthorizationHeader) {
     const token = env.AUTH_TOKEN;
     headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
@@ -113,6 +167,7 @@ export async function executeRequest(
   const url = buildUrl(req);
   const curlArgs: string[] = [
     '-s',
+    '-S', // with -s: still show actual error messages on stderr (needed for transport failure details)
     '--max-time', String(timeout),
     '-X', req.method,
   ];
@@ -199,13 +254,33 @@ export async function executeRequest(
   curlArgs.push(url);
 
   if (process.env.SHOGUN_DEBUG) {
-    process.stderr.write(`[unix-backend] curl-args: ${JSON.stringify(curlArgs)}\n`);
+    // SECURITY: never log raw curl args — they contain Authorization headers,
+    // credentials, and URLs with sensitive query params. redactCurlArgs() masks
+    // them while preserving the argument shape for debugging.
+    process.stderr.write(`[unix-backend] curl-args: ${JSON.stringify(redactCurlArgs(curlArgs))}\n`);
   }
 
   const startTime = Date.now();
 
   try {
-    const { stdout, stderr } = await spawnPromise('curl', curlArgs);
+    let stdout: string;
+    let stderr: string;
+    try {
+      ({ stdout, stderr } = await spawnPromise('curl', curlArgs));
+    } catch (err) {
+      // Transport failure: curl could not complete the HTTP exchange (DNS
+      // failure, TLS error, connection refused, timeout, ...). HTTP 4xx/5xx
+      // responses never land here — they are valid responses (curl exits 0
+      // without -f). Surface a structured error with sanitized stderr.
+      if (err instanceof CommandExitError) {
+        throw new CurlTransportError({
+          exitCode: err.exitCode,
+          signal: err.signal,
+          stderr: err.stderr,
+        });
+      }
+      throw err; // spawn errors (ENOENT, etc.) propagate as-is
+    }
     const duration = Date.now() - startTime;
 
     const sentinelMatch = stdout.match(/__SHOGUN_STATUS__(\d+)__SHOGUN_TIME__([\d.]+)/);
@@ -238,7 +313,9 @@ export async function executeRequest(
     }
 
     if (stderr && process.env.SHOGUN_DEBUG) {
-      console.error(`[unix-backend] curl stderr: ${stderr}`);
+      // SECURITY: stderr can echo the request URL (with sensitive query
+      // params) — sanitize before logging.
+      console.error(`[unix-backend] curl stderr: ${redactText(stderr)}`);
     }
 
     return { status, headers: responseHeaders, body, raw, duration, curlMs, events };
@@ -278,7 +355,17 @@ function spawnPromise(cmd: string, args: string[]): Promise<{ stdout: string; st
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
     proc.on('error', reject);
-    proc.on('close', () => resolve({ stdout, stderr }));
+    proc.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      // A nonzero exit code (or termination signal) means the command failed.
+      // Previously this resolved regardless of exit status, which made curl
+      // transport failures (DNS errors, TLS failures, timeouts) look like
+      // normal empty responses. Callers now get a structured rejection.
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new CommandExitError(cmd, code, signal, stderr));
+      }
+    });
   });
 }
 

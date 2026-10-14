@@ -23,7 +23,7 @@
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build",
     "lint:yaml": "tsx src/index.ts lint",
-    "test:unit": "tsx --test src/tests/suite-collection-vars.test.ts src/tests/coverage-matcher.test.ts src/tests/runner-pure.test.ts src/tests/suite-validation.test.ts src/tests/loader-pure.test.ts src/tests/logger-pure.test.ts",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "test:smoke": "tsx src/index.ts run --suite smoke",
     "test:tsap": "tsx src/index.ts run --suite tsap",
     "test:failures": "tsx src/index.ts run --collection _failures_",
@@ -34,7 +34,7 @@
     "pkg:macos": "node scripts/gen-version.mjs && bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile bin/shogun-macos-arm64 && cp bin/shogun-macos-arm64 bin/shogun",
     "pkg:linux": "node scripts/gen-version.mjs && bun build --compile --target=bun-linux-x64 src/index.ts --outfile bin/shogun-linux-x64",
     "pkg:linux-arm64": "node scripts/gen-version.mjs && bun build --compile --target=bun-linux-arm64 src/index.ts --outfile bin/shogun-linux-arm64",
-    "pkg:win": "node scripts/gen-version.mjs && bun build --compile --target=bun-windows-x64-baseline src/index.ts --outfile bin/shogun",
+    "pkg:win": "node scripts/gen-version.mjs && bun build --compile --target=bun-windows-x64-baseline src/index.ts --outfile bin/shogun-win-x64.exe",
     "pkg:all": "npm run pkg:macos && npm run pkg:linux && npm run pkg:linux-arm64 && npm run pkg:win"
   },
   "dependencies": {
@@ -66,6 +66,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/shogun.git"
-  }
+    "url": "https://github.com/ericroliver/shogun.git"
+  },
+  "homepage": "https://github.com/ericroliver/shogun#readme",
+  "bugs": "https://github.com/ericroliver/shogun/issues"
 }
