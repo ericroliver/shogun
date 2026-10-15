@@ -129,22 +129,41 @@ export async function executeRequest(
 
   // Detect multipart/form-data requests
   const effectiveContentType = opts.contentType ?? 'application/json';
+  // Native multipart (curl -F): only when the request body actually uses the
+  // structured form_fields/form_files shape. When curl adds -F parts it
+  // auto-generates the Content-Type (with boundary), so a manually-set
+  // header must be removed to avoid a boundary mismatch.
+  // MANUAL multipart (body is a string / inline object, no form_* fields):
+  // the user constructed the multipart payload themselves — send it verbatim
+  // via --data-binary and PRESERVE their Content-Type header (with boundary).
+  const nativeMultipartBody =
+    req.body !== undefined && req.body !== null &&
+    typeof req.body === 'object' && !Array.isArray(req.body) &&
+    (('form_fields' in (req.body as object) && (req.body as { form_fields?: unknown }).form_fields) ||
+     ('form_files' in (req.body as object) && (req.body as { form_files?: unknown }).form_files));
+
   const isMultipart = effectiveContentType === 'multipart/form-data' ||
-    (req.content_type === 'multipart/form-data');
+    req.content_type === 'multipart/form-data';
+
+  // Case-insensitive Content-Type detection (HTTP header names are case-insensitive)
+  const hasContentTypeHeader = (o: Record<string, string>): boolean =>
+    Object.keys(o).some((k) => k.trim().toLowerCase() === 'content-type');
 
   const headers: Record<string, string> = {
     'Accept': 'application/json',
     ...req.headers,
   };
 
-  // For multipart, let curl set the Content-Type with the boundary automatically.
-  // For all other content types, set it explicitly.
-  if (!isMultipart) {
+  if (isMultipart && nativeMultipartBody) {
+    // Native multipart: let curl generate the Content-Type + boundary from -F parts.
+    // Remove any manually-set Content-Type so it doesn't conflict.
+    for (const k of Object.keys(req.headers ?? {})) {
+      if (k.trim().toLowerCase() === 'content-type') delete headers[k];
+    }
+  } else if (!hasContentTypeHeader(headers)) {
+    // Only apply the default Content-Type when the request (or pre-script)
+    // doesn't already define one — never clobber an explicit header.
     headers['Content-Type'] = effectiveContentType;
-  } else {
-    // Remove any manually-set Content-Type so curl can auto-generate the boundary
-    delete headers['Content-Type'];
-    delete headers['content-type'];
   }
 
   // Auto-inject AUTH_TOKEN as Bearer only when:
@@ -186,8 +205,8 @@ export async function executeRequest(
   // --- Body handling ---
   let bodyInFile: string | null = null;
 
-  if (isMultipart && req.body !== undefined && req.body !== null) {
-    // Multipart: build curl -F arguments for form fields and file attachments
+  if (nativeMultipartBody) {
+    // Native multipart: build curl -F arguments for form fields and file attachments
     const body = req.body as {
       form_fields?: Record<string, string>;
       form_files?: Record<string, { path: string; content_type?: string; filename?: string }>;
@@ -219,7 +238,9 @@ export async function executeRequest(
       }
     }
   } else if (req.body !== undefined && req.body !== null) {
-    // Resolve the RequestBody wrapper ({ inline: ... } or { file: ... }) to
+    // Everything else — including a MANUALLY constructed multipart body
+    // (string with its own boundaries) — is sent verbatim via --data-binary
+    // with the user's Content-Type header preserved above. ({ inline: ... } or { file: ... }) to
     // the actual body value. Pre-script mutations may set a direct object,
     // which resolveRequestBody passes through unchanged.
     const resolvedBody = resolveRequestBody(req.body);

@@ -318,3 +318,98 @@ describe('executeRequest() — debug output redaction', () => {
     assert.ok(debugOutput.includes('[REDACTED]'), 'redaction marker should appear in debug output');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multipart / Content-Type regression (manual vs native multipart)
+// ---------------------------------------------------------------------------
+
+/** Loopback HTTP server that echoes headers AND raw body back. */
+function startBodyEchoServer(): Promise<number> {
+  return new Promise((resolve) => {
+    const server = trackServer(http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          headers: req.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+    }));
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
+  });
+}
+
+describe('executeRequest() — manual multipart body preserves Content-Type and body', () => {
+  test('manual multipart string body: header + body sent verbatim', async () => {
+    const port = await startBodyEchoServer();
+    const boundary = 'shogun123';
+    const manualBody =
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="text"\r\n\r\n` +
+      `hello\r\n` +
+      `--${boundary}--\r\n`;
+    const req: ShogunRequest = {
+      method: 'POST',
+      url: `http://127.0.0.1:${port}/upload`,
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body: manualBody,
+    } as unknown as ShogunRequest;
+    const res = await executeRequest(req, {}, {});
+    const parsed = JSON.parse(String(res.raw)) as {
+      headers: Record<string, string>;
+      body: string;
+    };
+    assert.match(parsed.headers['content-type'] ?? '', /multipart\/form-data/);
+    assert.match(parsed.headers['content-type'] ?? '', new RegExp(boundary));
+    assert.ok(parsed.body.includes('--shogun123'), 'manual multipart body must be sent');
+    assert.ok(parsed.body.includes('hello'));
+  });
+
+  test('manual multipart with lowercase content-type header also preserved', async () => {
+    const port = await startBodyEchoServer();
+    const req: ShogunRequest = {
+      method: 'POST',
+      url: `http://127.0.0.1:${port}/upload`,
+      headers: { 'content-type': 'multipart/form-data; boundary=x' },
+      body: 'not-empty',
+    } as unknown as ShogunRequest;
+    const res = await executeRequest(req, {}, {});
+    const parsed = JSON.parse(String(res.raw)) as { headers: Record<string, string> };
+    assert.match(parsed.headers['content-type'] ?? '', /multipart\/form-data/);
+    assert.ok((JSON.parse(String(res.raw)) as { body: string }).body.includes('not-empty'));
+  });
+
+  test('pre-script Content-Type is not clobbered by default for non-multipart', async () => {
+    const port = await startBodyEchoServer();
+    const req: ShogunRequest = {
+      method: 'POST',
+      url: `http://127.0.0.1:${port}/thing`,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: 'raw text',
+    } as unknown as ShogunRequest;
+    const res = await executeRequest(req, {}, {});
+    const parsed = JSON.parse(String(res.raw)) as { headers: Record<string, string> };
+    assert.match(parsed.headers['content-type'] ?? '', /^text\/plain/);
+    assert.ok(!String(parsed.headers['content-type']).includes('application/json'));
+  });
+
+  test('native form_fields multipart still works (curl -F path)', async () => {
+    const port = await startBodyEchoServer();
+    const req: ShogunRequest = {
+      method: 'POST',
+      url: `http://127.0.0.1:${port}/upload`,
+      content_type: 'multipart/form-data',
+      body: { form_fields: { text: 'hi', file: 'x' } },
+    } as unknown as ShogunRequest;
+    const res = await executeRequest(req, {}, {});
+    const parsed = JSON.parse(String(res.raw)) as {
+      headers: Record<string, string>;
+      body: string;
+    };
+    assert.match(parsed.headers['content-type'] ?? '', /multipart\/form-data/);
+    assert.match(parsed.body, /name="text"/);
+    assert.match(parsed.body, /hi/);
+  });
+});

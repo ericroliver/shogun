@@ -146,6 +146,12 @@ const items = Array.isArray(body) ? body : (body.agents ?? body.items ?? []);
 
 `NEEDS BASELINE` after `shogun snapshot` = the test was failing when snapshot ran. Snapshots are only written for passing tests.
 
+**Baseline location in `--file` mode:** baselines resolve to `expected/<collection>/` from (1) the CLI `--collection <name>` flag, then (2) the test YAML's top-level `collection:` field. Only when neither is set do baselines land in `expected/default/`.
+
+```bash
+shogun snapshot --file tests/collections/agents/get-agents.yaml --collection agents
+```
+
 **Diagnosis flow:**
 1. Test shows `NEEDS BASELINE` → the test failed during the snapshot run
 2. Look at the test's shape assertions — do they match the actual response?
