@@ -446,14 +446,16 @@ async function ensureSnapshotRestore(
   }
 
   console.log(`  📸 Restoring snapshot "${snapshotName}" → database "${database}"...`);
+  const restoreStartMs = Date.now();
   const result = await provider.restore(database, snapshotName);
+  const restoreDurS = ((Date.now() - restoreStartMs) / 1000).toFixed(1);
 
   if (result.success) {
-    console.log(`  ✓ ${result.message}`);
+    console.log(`  ✓ ${result.message} (${restoreDurS}s)`);
     return true;
   }
 
-  console.error(`  ✗ ${result.message}`);
+  console.error(`  ✗ ${result.message} (${restoreDurS}s)`);
   return false;
 }
 
